@@ -33,7 +33,15 @@ struct DashboardView: View {
             max(0, FinanceEngine.memberBalance(personID: person.id, entries: memberEntries)) + partial
         }
     }
-    private var unclearedTransactions: [LedgerTransaction] { transactions.filter { !$0.isCleared } }
+    /// Only bank-type accounts clear against a statement. Cash on Hand and Undeposited Funds entries
+    /// (including every deposit batch's holding leg) never "clear", so counting them made the monthly
+    /// close impossible to finish.
+    private var bankAccountIDs: Set<UUID> {
+        Set(accounts.filter { $0.kind != .cash && $0.kind != .undepositedFunds }.map(\.id))
+    }
+    private var unclearedTransactions: [LedgerTransaction] {
+        transactions.filter { !$0.isCleared && $0.accountID.map(bankAccountIDs.contains) == true }
+    }
     private var upcomingEvents: [EventRecord] {
         Array(events.filter { $0.endDate >= Calendar.current.startOfDay(for: Date()) && $0.status != .cancelled }.prefix(4))
     }

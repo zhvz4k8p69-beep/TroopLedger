@@ -208,10 +208,12 @@ struct ReconciliationView: View {
             let record = ReconciliationRecord(accountID: account?.id, statementDate: statementDate, statementEndingBalanceCents: statementCents, clearedBalanceCents: clearedBalance)
             record.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
             modelContext.insert(record)
+            var clearedDescriptions: [String] = []
             for transaction in transactions where selected.contains(transaction.id) {
                 transaction.isCleared = true
                 transaction.reconciledAt = Date()
                 transaction.reconciliationID = record.id
+                clearedDescriptions.append("\(transaction.id.uuidString.lowercased()) \(transaction.date.formatted(date: .numeric, time: .omitted)) \(Money.currency(cents: transaction.signedAmountCents))")
             }
             let accountLabel = account?.name ?? "account"
             AuditLogger.record(
@@ -223,6 +225,8 @@ struct ReconciliationView: View {
                     ("Statement ending balance", Money.currency(cents: record.statementEndingBalanceCents)),
                     ("Cleared balance", Money.currency(cents: record.clearedBalanceCents)),
                     ("Transactions cleared", String(selected.count)),
+                    // An auditor needs to know which items this reconciliation cleared, not only how many.
+                    ("Cleared items", clearedDescriptions.sorted().joined(separator: "\n")),
                     ("Notes", record.notes),
                 ]),
                 in: modelContext

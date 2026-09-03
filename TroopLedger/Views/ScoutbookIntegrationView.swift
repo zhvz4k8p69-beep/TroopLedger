@@ -46,6 +46,7 @@ struct ScoutbookIntegrationView: View {
     @State private var subscriptionName = "Troop Calendar"
     @State private var subscriptionURL = ""
     @State private var syncingIDs: Set<UUID> = []
+    @State private var pendingRemoval: ExternalCalendarSubscription?
 
     var body: some View {
         List {
@@ -71,6 +72,17 @@ struct ScoutbookIntegrationView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Matching member IDs or names will be updated. Payment-log rows use stable duplicate identifiers.")
+        }
+        .confirmationDialog(
+            "Remove this calendar subscription?",
+            isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingRemoval
+        ) { subscription in
+            Button("Remove \(subscription.name)", role: .destructive) { remove(subscription) }
+            Button("Cancel", role: .cancel) { pendingRemoval = nil }
+        } message: { subscription in
+            Text("Every event synchronized from \(subscription.name) will be deleted unless it has local financial or roster records. Scoutbook itself is not changed.")
         }
         .alert("Scoutbook Integration", isPresented: Binding(get: { errorMessage != nil || statusMessage != nil }, set: { if !$0 { errorMessage = nil; statusMessage = nil } })) {
             Button("OK") { errorMessage = nil; statusMessage = nil }
@@ -250,7 +262,13 @@ struct ScoutbookIntegrationView: View {
 
     private func addSubscription() {
         do {
-            _ = try ScoutbookCalendarService.validatedURL(subscriptionURL)
+            let url = try ScoutbookCalendarService.validatedURL(subscriptionURL)
+            // The same feed subscribed twice creates every event twice, because each subscription matches
+            // only its own events.
+            if let existing = subscriptions.first(where: { URL(string: $0.feedURLString.trimmingCharacters(in: .whitespacesAndNewlines)) == url }) {
+                errorMessage = "That feed is already subscribed as \(existing.name). Use Sync to refresh it."
+                return
+            }
             let subscription = ExternalCalendarSubscription(
                 name: subscriptionName.trimmingCharacters(in: .whitespacesAndNewlines),
                 feedURLString: subscriptionURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -287,8 +305,14 @@ struct ScoutbookIntegrationView: View {
     }
 
     private func removeSubscriptions(at offsets: IndexSet) {
+        guard let index = offsets.first else { return }
+        pendingRemoval = subscriptions[index]
+    }
+
+    private func remove(_ subscription: ExternalCalendarSubscription) {
+        pendingRemoval = nil
         do {
-            for index in offsets { try ScoutbookCalendarService.remove(subscription: subscriptions[index], from: modelContext) }
+            try ScoutbookCalendarService.remove(subscription: subscription, from: modelContext)
         } catch {
             errorMessage = error.localizedDescription
         }

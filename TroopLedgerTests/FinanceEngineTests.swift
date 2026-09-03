@@ -318,6 +318,7 @@ final class FinanceEngineTests: XCTestCase {
             sourceTransactionIDs: [ledgerReceipt.id],
             sourceCashReceiptIDs: [importedReceipt.id],
             reconciliations: [],
+            now: date,
             in: context
         )
 
@@ -1518,7 +1519,8 @@ final class FinanceEngineTests: XCTestCase {
             asOfDate: try date(2026, 9, 30),
             troopProfile: troopProfile,
             generatedAt: try date(2026, 9, 30),
-            calendar: calendar
+            calendar: calendar,
+            now: try date(2026, 9, 30)
         )
 
         XCTAssertEqual(snapshot.memberNames, ["Alex Able", "Jordan Able"])
@@ -2696,5 +2698,120 @@ final class FinanceEngineTests: XCTestCase {
         XCTAssertEqual(document.rows.first?.cells[2].count, GeneralSpreadsheetImporter.maximumCellLength)
         let scoutbook = try ScoutbookImporter.parse(data: Data("First Name,Last Name,Notes\nAva,Scout,\(memo)\n".utf8), sourceName: "members.csv")
         XCTAssertEqual(scoutbook.rows.first?.value(["Notes"]).count, ScoutbookImporter.maximumCellLength)
+    }
+
+    // MARK: - Regression tests for the third audit round
+
+    func testMemberLedgerAdjustmentsRequireAnExplanation() {
+        XCTAssertThrowsError(try MemberEntryPolicy.validate(kind: .adjustmentDecrease, amountCents: 500, category: "Dues", notes: "  ")) { error in
+            XCTAssertEqual(error as? MemberEntryValidationError, .adjustmentReasonRequired)
+        }
+        XCTAssertNoThrow(try MemberEntryPolicy.validate(kind: .adjustmentIncrease, amountCents: 500, category: "Dues", notes: "Corrects double charge"))
+        XCTAssertNoThrow(try MemberEntryPolicy.validate(kind: .charge, amountCents: 500, category: "Dues", notes: ""))
+        XCTAssertThrowsError(try MemberEntryPolicy.validate(kind: .payment, amountCents: 0, category: "Dues", notes: ""))
+    }
+
+    func testPersonPolicyRejectsDuplicateScoutingMemberIDs() {
+        let existing = PersonRecord(firstName: "Ava", lastName: "Scout", role: .scout)
+        existing.scoutingMemberID = "1001"
+        XCTAssertThrowsError(try PersonPolicy.validate(firstName: "Ben", lastName: "Scout", memberID: " 1001 ", editingPersonID: nil, people: [existing])) { error in
+            XCTAssertEqual(error as? PersonValidationError, .duplicateMemberID("Ava Scout"))
+        }
+        XCTAssertNoThrow(try PersonPolicy.validate(firstName: "Ava", lastName: "Scout", memberID: "1001", editingPersonID: existing.id, people: [existing]))
+        XCTAssertNoThrow(try PersonPolicy.validate(firstName: "Ben", lastName: "Scout", memberID: "", editingPersonID: nil, people: [existing]))
+        XCTAssertThrowsError(try PersonPolicy.validate(firstName: " ", lastName: "", memberID: "", editingPersonID: nil, people: []))
+    }
+
+    func testPostingValidationRejectsInactiveAccounts() {
+        let active = UUID()
+        let archived = UUID()
+        XCTAssertEqual(
+            PeriodLocking.validatePosting(accountID: archived, date: Date(), isAdjustment: false, adjustsTransactionID: nil, adjustmentReason: "", reconciliations: [], activeAccountIDs: [active]),
+            .inactiveAccount
+        )
+        XCTAssertEqual(
+            PeriodLocking.validatePosting(accountID: active, date: Date(), isAdjustment: false, adjustsTransactionID: nil, adjustmentReason: "", reconciliations: [], activeAccountIDs: [active]),
+            .valid
+        )
+    }
+
+    @MainActor
+    func testBatchDepositRejectsFutureDepositDates() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let undeposited = AccountRecord(name: "Undeposited Funds", kind: .undepositedFunds)
+        let checking = AccountRecord(name: "Checking", kind: .checking)
+        let receipt = LedgerTransaction(accountID: undeposited.id, date: Date(), direction: .income, amountCents: 1_000, payee: "Family", category: "Dues")
+        context.insert(undeposited)
+        context.insert(checking)
+        context.insert(receipt)
+        try context.save()
+        XCTAssertThrowsError(try BatchDepositService.post(
+            destinationAccountID: checking.id,
+            depositDate: Date().addingTimeInterval(2 * 86_400),
+            reference: "",
+            notes: "",
+            sourceTransactionIDs: [receipt.id],
+            sourceCashReceiptIDs: [],
+            reconciliations: [],
+            in: context
+        )) { error in
+            XCTAssertEqual(error as? BatchDepositError, .depositDateInFuture)
+        }
+        XCTAssertEqual(try context.fetch(FetchDescriptor<DepositBatchRecord>()).count, 0)
+    }
+
+    @MainActor
+    func testEventCloseoutRefusesEventsThatHaveNotEndedOrFutureCloseDates() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let event = EventRecord(name: "Campout", startDate: Date(), endDate: Date().addingTimeInterval(3 * 86_400))
+        let participant = EventParticipant(eventID: event.id, personID: nil, status: .registered)
+        participant.guestName = "Guest"
+        context.insert(event)
+        context.insert(participant)
+        let preview = try EventCloseoutService.makePreview(event: event, participants: [participant], people: [], transactions: [], financialEntries: [])
+        XCTAssertThrowsError(try EventCloseoutService.post(preview: preview, event: event, closeDate: Date(), notes: "", postMemberAdjustments: false, existingCloseouts: [], in: context)) { error in
+            XCTAssertEqual(error as? EventCloseoutError, .eventNotEnded)
+        }
+        event.endDate = Date().addingTimeInterval(-86_400)
+        XCTAssertThrowsError(try EventCloseoutService.post(preview: preview, event: event, closeDate: Date().addingTimeInterval(5 * 86_400), notes: "", postMemberAdjustments: false, existingCloseouts: [], in: context)) { error in
+            XCTAssertEqual(error as? EventCloseoutError, .closeDateInFuture)
+        }
+        XCTAssertNil(event.closedAt)
+    }
+
+    func testFamilyStatementRejectsFutureAsOfDates() {
+        let family = FamilyRecord(name: "Family")
+        let member = PersonRecord(firstName: "Ava", lastName: "Scout", role: .scout)
+        member.familyID = family.id
+        XCTAssertThrowsError(try FamilyStatementService.makeSnapshot(
+            family: family, people: [member], entries: [], events: [],
+            periodStart: Date(), asOfDate: Date().addingTimeInterval(3 * 86_400)
+        )) { error in
+            XCTAssertEqual(error as? FamilyStatementError, .asOfDateInFuture)
+        }
+    }
+
+    @MainActor
+    func testAuditChangesListOnlyFieldsThatDiffer() {
+        let before = [("Name", "Checking"), ("Opening balance", "$100.00"), ("Notes", "")]
+        let after = [("Name", "Checking"), ("Opening balance", "$250.00"), ("Notes", "Moved bank")]
+        let changes = AuditLogger.changes(from: before, to: after)
+        XCTAssertEqual(changes.count, 2)
+        XCTAssertEqual(changes.first?.0, "Changed Opening balance")
+        XCTAssertEqual(changes.first?.1, "$100.00 → $250.00")
+        XCTAssertEqual(changes.last?.1, "(empty) → Moved bank")
+    }
+
+    func testTreasurerReportGroupsCategoriesIgnoringWhitespace() {
+        let day = Date(timeIntervalSince1970: 1_756_800_000)
+        let account = AccountRecord(name: "Checking")
+        let first = LedgerTransaction(accountID: account.id, date: day, direction: .income, amountCents: 100, payee: "A", category: "Dues")
+        let second = LedgerTransaction(accountID: account.id, date: day, direction: .income, amountCents: 200, payee: "B", category: " Dues ")
+        let blank = LedgerTransaction(accountID: account.id, date: day, direction: .income, amountCents: 50, payee: "C", category: "   ")
+        let report = TreasurerReportService.makeSnapshot(title: "Test", periodStart: day, periodEnd: day, profile: nil, accounts: [account], transactions: [first, second, blank], people: [], memberEntries: [], reconciliations: [])
+        XCTAssertEqual(report.income.map(\.category).sorted(), ["Dues", "Uncategorized"])
+        XCTAssertEqual(report.income.first { $0.category == "Dues" }?.amountCents, 300)
     }
 }

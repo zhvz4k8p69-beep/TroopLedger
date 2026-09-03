@@ -196,6 +196,18 @@ struct ReimbursementEditorView: View {
         )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
     }
 
+    private func snapshot(_ record: ReimbursementRequest) -> [(String, String)] {
+        [
+            ("Requester", people.first { $0.id == record.requesterPersonID }?.displayName ?? ""),
+            ("Purchase date", record.purchaseDate.formatted(date: .numeric, time: .omitted)),
+            ("Purpose", record.purpose),
+            ("Category", record.category),
+            ("Amount", Money.currency(cents: record.amountCents)),
+            ("Event", events.first { $0.id == record.eventID }?.name ?? ""),
+            ("Notes", record.notes),
+        ]
+    }
+
     private func save() {
         do {
             let cents = Money.cents(from: amount)
@@ -216,6 +228,7 @@ struct ReimbursementEditorView: View {
                 eventID: eventID
             )
             guard record.status == .submitted else { throw ReimbursementError.requestNotSubmitted }
+            let before = request.map(snapshot)
             record.requesterPersonID = requesterPersonID
             record.purchaseDate = purchaseDate
             record.purpose = purpose.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -236,7 +249,7 @@ struct ReimbursementEditorView: View {
                     ("Category", record.category),
                     ("Requester ID", record.requesterPersonID?.uuidString),
                     ("Event ID", record.eventID?.uuidString),
-                ]),
+                ] + (before.map { AuditLogger.changes(from: $0, to: snapshot(record)) } ?? [])),
                 in: modelContext
             )
             try modelContext.save()

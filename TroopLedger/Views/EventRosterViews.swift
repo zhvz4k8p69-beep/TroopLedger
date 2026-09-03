@@ -9,6 +9,7 @@ struct EventRosterView: View {
     @Query(sort: \TroopProfileRecord.modifiedAt, order: .reverse) private var troopProfiles: [TroopProfileRecord]
     @State private var showingBuilder = false
     @State private var participantToEdit: EventParticipant?
+    @State private var errorMessage: String?
 
     private var participants: [EventParticipant] {
         let roster = EventRosterSnapshot(event: event, participants: allParticipants.filter { $0.eventID == event.id }, people: people, troopProfile: troopProfiles.first)
@@ -80,6 +81,9 @@ struct EventRosterView: View {
         }
         .sheet(isPresented: $showingBuilder) { EventRosterBuilderView(event: event) }
         .sheet(item: $participantToEdit) { EventParticipantFormView(event: event, participant: $0) }
+        .alert("Event Roster", isPresented: Binding(
+            get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
+        )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
     }
 
     @ViewBuilder
@@ -106,6 +110,11 @@ struct EventRosterView: View {
                             in: modelContext
                         )
                         modelContext.delete(participant)
+                    }
+                    do {
+                        try modelContext.save()
+                    } catch {
+                        errorMessage = "The roster change could not be saved: \(error.localizedDescription)"
                     }
                 }
             }
@@ -203,9 +212,20 @@ struct EventRosterBuilderView: View {
     @State private var activityFilter: PersonActivityFilter = .active
     @State private var roleFilter: PersonRoleFilter = .all
     @State private var guestNames = ""
+    @State private var errorMessage: String?
+
+    private var existingPersonIDs: Set<UUID> {
+        Set(allParticipants.filter { $0.eventID == event.id }.compactMap(\.personID))
+    }
+
+    /// The raw selection can hold people who were added from another device or deleted while this sheet was
+    /// open; only people who still exist and are not already on the roster are counted or added.
+    private var effectiveSelection: Set<UUID> {
+        selection.intersection(Set(people.map(\.id))).subtracting(existingPersonIDs)
+    }
 
     private var availablePeople: [PersonRecord] {
-        let existing = Set(allParticipants.filter { $0.eventID == event.id }.compactMap(\.personID))
+        let existing = existingPersonIDs
         return people.filter { person in
             !existing.contains(person.id)
                 && activityFilter.includes(person)
@@ -227,7 +247,7 @@ struct EventRosterBuilderView: View {
             .filter { !$0.isEmpty }
     }
 
-    private var additionCount: Int { selection.count + guestNamesToAdd.count }
+    private var additionCount: Int { effectiveSelection.count + guestNamesToAdd.count }
 
     var body: some View {
         NavigationStack {
@@ -331,6 +351,9 @@ struct EventRosterBuilderView: View {
         }
 #endif
         .frame(minWidth: 480, minHeight: 560)
+        .alert("Add to Roster", isPresented: Binding(
+            get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
+        )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
     }
 
     private func toggle(_ id: UUID) {
@@ -350,7 +373,7 @@ struct EventRosterBuilderView: View {
 
     private func addSelected() {
         guard EventMutationPolicy.canEdit(event) else { return }
-        for id in selection {
+        for id in effectiveSelection {
             let participant = EventParticipant(eventID: event.id, personID: id, status: .registered)
             modelContext.insert(participant)
             let name = people.first { $0.id == id }?.displayName ?? "Unknown person"
@@ -374,7 +397,12 @@ struct EventRosterBuilderView: View {
                 in: modelContext
             )
         }
-        dismiss()
+        do {
+            try modelContext.save()
+            dismiss()
+        } catch {
+            errorMessage = "The roster could not be saved: \(error.localizedDescription)"
+        }
     }
 }
 

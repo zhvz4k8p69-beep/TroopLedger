@@ -13,6 +13,7 @@ enum BatchDepositError: LocalizedError, Equatable {
     case importedReceiptDateLocked(Date)
     case undepositedPeriodLocked(Date)
     case destinationPeriodLocked(Date)
+    case depositDateInFuture
 
     var errorDescription: String? {
         switch self {
@@ -27,6 +28,7 @@ enum BatchDepositError: LocalizedError, Equatable {
         case .importedReceiptDateLocked(let date): "An imported receipt falls in a period locked through \(date.formatted(date: .long, time: .omitted)). Exclude that receipt or record an authorized adjustment."
         case .undepositedPeriodLocked(let date): "Undeposited Funds is locked through \(date.formatted(date: .long, time: .omitted)). Choose a later deposit date."
         case .destinationPeriodLocked(let date): "The destination account is locked through \(date.formatted(date: .long, time: .omitted)). Choose a later deposit date."
+        case .depositDateInFuture: "A deposit cannot be dated in the future. Record it on the day the bank received it."
         }
     }
 }
@@ -67,8 +69,13 @@ enum BatchDepositService {
         sourceCashReceiptIDs: Set<UUID>,
         reconciliations: [ReconciliationRecord],
         calendar: Calendar = .current,
+        now: Date = Date(),
         in modelContext: ModelContext
     ) throws -> DepositBatchRecord {
+        // A future-dated deposit books bank income that does not exist yet and skews every report until then.
+        guard calendar.startOfDay(for: depositDate) <= calendar.startOfDay(for: now) else {
+            throw BatchDepositError.depositDateInFuture
+        }
         let accounts = try modelContext.fetch(FetchDescriptor<AccountRecord>())
         guard let undeposited = accounts.first(where: { $0.kind == .undepositedFunds && $0.isActive }) else {
             throw BatchDepositError.undepositedFundsAccountRequired

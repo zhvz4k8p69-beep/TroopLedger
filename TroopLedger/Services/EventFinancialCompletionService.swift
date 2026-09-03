@@ -187,10 +187,14 @@ enum EventCloseoutError: LocalizedError, Equatable {
     case noFinancialParticipants
     case readOnly
     case previewEventMismatch
+    case eventNotEnded
+    case closeDateInFuture
 
     var errorDescription: String? {
         switch self {
         case .alreadyClosed: "This event already has a posted close-out and its roster is frozen."
+        case .eventNotEnded: "This event has not ended yet. Closing it now would freeze the roster and totals before attendance and costs are final."
+        case .closeDateInFuture: "The close date cannot be in the future."
         case .noFinancialParticipants: "Add at least one registered, attended, or no-show participant before closing the event."
         case .readOnly: "Scoutbook-synchronized events must be detached from the calendar before changing their roster or financial plan."
         case .previewEventMismatch: "The close-out preview belongs to a different event. Refresh the close-out before posting."
@@ -307,10 +311,15 @@ enum EventCloseoutService {
         notes: String,
         postMemberAdjustments: Bool,
         existingCloseouts: [EventCloseoutRecord],
+        now: Date = Date(),
+        calendar: Calendar = .current,
         in context: ModelContext
     ) throws -> EventCloseoutRecord {
         guard !event.isReadOnly else { throw EventCloseoutError.readOnly }
         guard preview.eventID == event.id else { throw EventCloseoutError.previewEventMismatch }
+        let today = calendar.startOfDay(for: now)
+        guard calendar.startOfDay(for: event.endDate) <= today else { throw EventCloseoutError.eventNotEnded }
+        guard calendar.startOfDay(for: closeDate) <= today else { throw EventCloseoutError.closeDateInFuture }
         guard event.closedAt == nil, event.closeoutID == nil, !existingCloseouts.contains(where: { $0.eventID == event.id }) else {
             throw EventCloseoutError.alreadyClosed
         }

@@ -63,6 +63,7 @@ struct PeopleListView: View {
     @State private var roleFilter: PersonRoleFilter = .all
     @State private var showingNewPerson = false
     @State private var deletionMessage: String?
+    @State private var pendingDeletion: PersonRecord?
 
     private var filtered: [PersonRecord] {
         people.filter { person in
@@ -144,6 +145,17 @@ struct PeopleListView: View {
             Button("Add Person", systemImage: "plus") { showingNewPerson = true }
         }
         .sheet(isPresented: $showingNewPerson) { PersonFormView() }
+        .confirmationDialog(
+            "Delete this person?",
+            isPresented: Binding(get: { pendingDeletion != nil }, set: { if !$0 { pendingDeletion = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { person in
+            Button("Delete \(person.displayName)", role: .destructive) { deletePerson(person) }
+            Button("Cancel", role: .cancel) { pendingDeletion = nil }
+        } message: { person in
+            Text("\(person.displayName) has no financial, registration, or event records and will be removed permanently. Mark people inactive instead when their history should be kept.")
+        }
         .alert("People", isPresented: Binding(
             get: { deletionMessage != nil },
             set: { if !$0 { deletionMessage = nil } }
@@ -170,22 +182,27 @@ struct PeopleListView: View {
     }
 
     private func deletePeople(at offsets: IndexSet) {
-        for index in offsets {
-            let person = filtered[index]
-            guard RecordDeletionPolicy.canDeletePerson(
-                person.id,
-                transactions: transactions,
-                depositAllocations: depositAllocations,
-                reimbursements: reimbursements,
-                recurringAllocations: recurringAllocations,
-                memberEntries: entries,
-                registrations: registrations,
-                participants: participants,
-                closeoutAllocations: closeoutAllocations
-            ) else {
-                deletionMessage = "This person is referenced by financial, registration, reimbursement, or event records and cannot be deleted. Mark the person inactive instead."
-                continue
-            }
+        guard let index = offsets.first else { return }
+        let person = filtered[index]
+        guard RecordDeletionPolicy.canDeletePerson(
+            person.id,
+            transactions: transactions,
+            depositAllocations: depositAllocations,
+            reimbursements: reimbursements,
+            recurringAllocations: recurringAllocations,
+            memberEntries: entries,
+            registrations: registrations,
+            participants: participants,
+            closeoutAllocations: closeoutAllocations
+        ) else {
+            deletionMessage = "This person is referenced by financial, registration, reimbursement, or event records and cannot be deleted. Mark the person inactive instead."
+            return
+        }
+        pendingDeletion = person
+    }
+
+    private func deletePerson(_ person: PersonRecord) {
+        do {
             AuditLogger.record(
                 .delete,
                 recordType: "Person",
@@ -198,6 +215,10 @@ struct PeopleListView: View {
                 in: modelContext
             )
             modelContext.delete(person)
+            pendingDeletion = nil
+            try modelContext.save()
+        } catch {
+            deletionMessage = "The person could not be deleted: \(error.localizedDescription)"
         }
     }
 }
@@ -282,6 +303,7 @@ struct PersonDetailView: View {
 struct PersonFormView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
+    @Query private var people: [PersonRecord]
     private let person: PersonRecord?
     @State private var firstName: String
     @State private var lastName: String
@@ -296,6 +318,7 @@ struct PersonFormView: View {
     @State private var isActive: Bool
     @State private var notes: String
     @State private var showingPositions = false
+    @State private var errorMessage: String?
 
     init(person: PersonRecord? = nil) {
         self.person = person
@@ -373,6 +396,24 @@ struct PersonFormView: View {
                 preferredCategory: role == .scout ? .youth : .adult
             )
         }
+        .alert("Person", isPresented: Binding(
+            get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
+        )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
+    }
+
+    private func snapshot(_ record: PersonRecord) -> [(String, String)] {
+        [
+            ("Name", record.displayName),
+            ("Role", record.role.rawValue),
+            ("Rank", record.currentRank.displayName),
+            ("Positions", record.positionSummary),
+            ("Patrol", record.patrol),
+            ("Scouting Member ID", record.scoutingMemberID),
+            ("Email", record.email),
+            ("Phone", record.phone),
+            ("Active", record.isActive ? "Yes" : "No"),
+            ("Notes", record.notes),
+        ]
     }
 
     private var selectedPositionSummary: String {
@@ -383,36 +424,45 @@ struct PersonFormView: View {
     }
 
     private func save() {
-        let record = person ?? PersonRecord(firstName: firstName, lastName: lastName, role: role)
-        record.firstName = firstName.trimmingCharacters(in: .whitespacesAndNewlines)
-        record.lastName = lastName.trimmingCharacters(in: .whitespacesAndNewlines)
-        record.role = role
-        record.currentRank = currentRank
-        record.troopPositions = Array(selectedPositions)
-        record.customPosition = customPosition.trimmingCharacters(in: .whitespacesAndNewlines)
-        record.patrol = patrol
-        record.scoutingMemberID = memberID
-        record.email = email
-        record.phone = phone
-        record.isActive = isActive
-        record.notes = notes
-        let isNew = person == nil
-        if isNew { modelContext.insert(record) }
-        AuditLogger.record(
-            isNew ? .create : .edit,
-            recordType: "Person",
-            recordID: record.id,
-            summary: "\(isNew ? "Created" : "Edited") person \(record.displayName)",
-            details: AuditLogger.details([
-                ("Role", record.role.rawValue),
-                ("Rank", record.role == .scout ? record.currentRank.displayName : nil),
-                ("Positions", record.positionSummary),
-                ("Patrol", record.patrol),
-                ("Active", record.isActive ? "Yes" : "No"),
-            ]),
-            in: modelContext
-        )
-        dismiss()
+        do {
+            try PersonPolicy.validate(firstName: firstName, lastName: lastName, memberID: memberID, editingPersonID: person?.id, people: people)
+            let record = person ?? PersonRecord(firstName: firstName, lastName: lastName, role: role)
+            let before = person.map(snapshot)
+            // Identity and contact fields are matched exactly by the Scoutbook importer, so stray whitespace
+            // here would create duplicate people on the next import.
+            record.firstName = firstName.trimmingCharacters(in: .whitespacesAndNewlines)
+            record.lastName = lastName.trimmingCharacters(in: .whitespacesAndNewlines)
+            record.role = role
+            record.currentRank = currentRank
+            record.troopPositions = Array(selectedPositions)
+            record.customPosition = customPosition.trimmingCharacters(in: .whitespacesAndNewlines)
+            record.patrol = patrol.trimmingCharacters(in: .whitespacesAndNewlines)
+            record.scoutingMemberID = memberID.trimmingCharacters(in: .whitespacesAndNewlines)
+            record.email = email.trimmingCharacters(in: .whitespacesAndNewlines)
+            record.phone = phone.trimmingCharacters(in: .whitespacesAndNewlines)
+            record.isActive = isActive
+            record.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isNew = person == nil
+            if isNew { modelContext.insert(record) }
+            AuditLogger.record(
+                isNew ? .create : .edit,
+                recordType: "Person",
+                recordID: record.id,
+                summary: "\(isNew ? "Created" : "Edited") person \(record.displayName)",
+                details: AuditLogger.details([
+                    ("Role", record.role.rawValue),
+                    ("Rank", record.role == .scout ? record.currentRank.displayName : nil),
+                    ("Positions", record.positionSummary),
+                    ("Patrol", record.patrol),
+                    ("Active", record.isActive ? "Yes" : "No"),
+                ] + (before.map { AuditLogger.changes(from: $0, to: snapshot(record)) } ?? [])),
+                in: modelContext
+            )
+            try modelContext.save()
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -493,6 +543,9 @@ struct MemberEntryFormView: View {
     @State private var category = "Dues"
     @State private var eventID: UUID?
     @State private var notes = ""
+    @State private var errorMessage: String?
+
+    private var isAdjustment: Bool { kind == .adjustmentIncrease || kind == .adjustmentDecrease }
 
     var body: some View {
         NavigationStack {
@@ -508,7 +561,14 @@ struct MemberEntryFormView: View {
                         ForEach(events) { Text($0.name).tag($0.id as UUID?) }
                     }
                 }
-                Section("Notes") { TextField("Optional notes", text: $notes, axis: .vertical) }
+                Section(isAdjustment ? "Reason for Adjustment" : "Notes") {
+                    TextField(isAdjustment ? "Required explanation" : "Optional notes", text: $notes, axis: .vertical)
+                    if isAdjustment {
+                        Text("Balance adjustments change what a family owes without a charge or payment behind them, so the reason is recorded with the entry.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .formStyle(.grouped)
             .navigationTitle("Member Ledger Entry")
@@ -518,30 +578,44 @@ struct MemberEntryFormView: View {
             }
         }
         .frame(minWidth: 450, minHeight: 480)
+        .alert("Member Ledger Entry", isPresented: Binding(
+            get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
+        )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
     }
 
-    private var canSave: Bool { Money.cents(from: amount).map { $0 > 0 } == true && !category.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var canSave: Bool {
+        (try? MemberEntryPolicy.validate(kind: kind, amountCents: Money.cents(from: amount), category: category, notes: notes)) != nil
+    }
 
     private func save() {
-        guard let cents = Money.cents(from: amount), cents > 0 else { return }
-        let record = MemberLedgerEntry(personID: person.id, date: date, kind: kind, amountCents: cents, category: category.trimmingCharacters(in: .whitespacesAndNewlines))
-        record.eventID = eventID
-        record.notes = notes
-        modelContext.insert(record)
-        AuditLogger.record(
-            .create,
-            recordType: "Member Ledger Entry",
-            recordID: record.id,
-            summary: "Added \(record.kind.rawValue.lowercased()) for \(person.displayName)",
-            details: AuditLogger.details([
-                ("Date", record.date.formatted(date: .numeric, time: .omitted)),
-                ("Amount", Money.currency(cents: record.amountCents)),
-                ("Category", record.category),
-                ("Event ID", record.eventID?.uuidString),
-            ]),
-            in: modelContext
-        )
-        dismiss()
+        do {
+            let cents = Money.cents(from: amount)
+            try MemberEntryPolicy.validate(kind: kind, amountCents: cents, category: category, notes: notes)
+            guard let cents else { throw MemberEntryValidationError.invalidAmount }
+            let record = MemberLedgerEntry(personID: person.id, date: date, kind: kind, amountCents: cents, category: category.trimmingCharacters(in: .whitespacesAndNewlines))
+            record.eventID = eventID
+            record.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            modelContext.insert(record)
+            AuditLogger.record(
+                .create,
+                recordType: "Member Ledger Entry",
+                recordID: record.id,
+                summary: "Added \(record.kind.rawValue.lowercased()) for \(person.displayName)",
+                details: AuditLogger.details([
+                    ("Person ID", person.id.uuidString),
+                    ("Date", record.date.formatted(date: .numeric, time: .omitted)),
+                    ("Amount", Money.currency(cents: record.amountCents)),
+                    ("Category", record.category),
+                    ("Event ID", record.eventID?.uuidString),
+                    (isAdjustment ? "Adjustment reason" : "Notes", record.notes),
+                ]),
+                in: modelContext
+            )
+            try modelContext.save()
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 

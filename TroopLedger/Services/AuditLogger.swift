@@ -63,6 +63,17 @@ enum AuditLogger {
         return entry
     }
 
+    /// Builds "Changed <field>: before → after" lines from two snapshots taken around an edit, so an audit
+    /// entry shows what was altered rather than only the values that remained.
+    static func changes(from before: [(String, String)], to after: [(String, String)]) -> [(String, String?)] {
+        zip(before, after).compactMap { previous, current in
+            guard previous.1 != current.1 else { return nil }
+            let from = previous.1.isEmpty ? "(empty)" : previous.1
+            let to = current.1.isEmpty ? "(empty)" : current.1
+            return ("Changed \(previous.0)", "\(from) → \(to)")
+        }
+    }
+
     static func details(_ fields: [(String, String?)]) -> String {
         fields.compactMap { label, value in
             guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }

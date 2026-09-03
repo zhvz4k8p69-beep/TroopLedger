@@ -301,6 +301,7 @@ enum RegistrationPolicy {
 enum LedgerPostingValidation: Equatable {
     case valid
     case accountRequired
+    case inactiveAccount
     case locked(through: Date)
     case adjustmentTargetRequired
     case adjustmentReasonRequired
@@ -365,9 +366,12 @@ enum PeriodLocking {
         adjustsTransactionID: UUID?,
         adjustmentReason: String,
         reconciliations: [ReconciliationRecord],
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        activeAccountIDs: Set<UUID>? = nil
     ) -> LedgerPostingValidation {
-        guard accountID != nil else { return .accountRequired }
+        guard let accountID else { return .accountRequired }
+        // Deposits and reimbursement payments already refuse archived accounts; manual entries must too.
+        if let activeAccountIDs, !activeAccountIDs.contains(accountID) { return .inactiveAccount }
         if let lockDate = latestLockDate(for: accountID, reconciliations: reconciliations, calendar: calendar),
            calendar.startOfDay(for: date) <= lockDate {
             return .locked(through: lockDate)
@@ -379,6 +383,58 @@ enum PeriodLocking {
             }
         }
         return .valid
+    }
+}
+
+enum MemberEntryValidationError: LocalizedError, Equatable {
+    case invalidAmount
+    case categoryRequired
+    case adjustmentReasonRequired
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidAmount: "Enter an amount greater than zero."
+        case .categoryRequired: "Enter a member-ledger category."
+        case .adjustmentReasonRequired: "Explain why this balance adjustment is needed. Adjustments change what a family owes without a charge or payment behind them."
+        }
+    }
+}
+
+enum MemberEntryPolicy {
+    static func validate(kind: MemberEntryKind, amountCents: Int64?, category: String, notes: String) throws {
+        guard let amountCents, amountCents > 0 else { throw MemberEntryValidationError.invalidAmount }
+        guard !category.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw MemberEntryValidationError.categoryRequired }
+        if kind == .adjustmentIncrease || kind == .adjustmentDecrease,
+           notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw MemberEntryValidationError.adjustmentReasonRequired
+        }
+    }
+}
+
+enum PersonValidationError: LocalizedError, Equatable {
+    case nameRequired
+    case duplicateMemberID(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .nameRequired: "Enter a first or last name."
+        case .duplicateMemberID(let name): "That Scouting Member ID already belongs to \(name). Each person needs a distinct ID so imports update the right record."
+        }
+    }
+}
+
+enum PersonPolicy {
+    static func validate(firstName: String, lastName: String, memberID: String, editingPersonID: UUID?, people: [PersonRecord]) throws {
+        let first = firstName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let last = lastName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !first.isEmpty || !last.isEmpty else { throw PersonValidationError.nameRequired }
+        let id = memberID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty else { return }
+        if let other = people.first(where: {
+            $0.id != editingPersonID && $0.scoutingMemberID.trimmingCharacters(in: .whitespacesAndNewlines) == id
+        }) {
+            throw PersonValidationError.duplicateMemberID(other.displayName)
+        }
     }
 }
 

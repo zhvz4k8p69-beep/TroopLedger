@@ -16,6 +16,7 @@ struct EventListView: View {
     @State private var showingNewEvent = false
     @State private var presentation = EventPresentation.calendar
     @State private var deletionMessage: String?
+    @State private var pendingDeletion: EventRecord?
 
     private var upcomingEvents: [EventRecord] {
         events
@@ -76,6 +77,17 @@ struct EventListView: View {
                 .buttonStyle(.fieldbookProminent)
         }
         .sheet(isPresented: $showingNewEvent) { EventFormView() }
+        .confirmationDialog(
+            "Delete this event?",
+            isPresented: Binding(get: { pendingDeletion != nil }, set: { if !$0 { pendingDeletion = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { event in
+            Button("Delete \(event.name)", role: .destructive) { deleteEvent(event) }
+            Button("Cancel", role: .cancel) { pendingDeletion = nil }
+        } message: { event in
+            Text("\(event.name) has no roster, fee, or financial records and will be removed permanently.")
+        }
         .alert("Events", isPresented: Binding(
             get: { deletionMessage != nil },
             set: { if !$0 { deletionMessage = nil } }
@@ -291,24 +303,29 @@ struct EventListView: View {
     }
 
     private func deleteEvents(at offsets: IndexSet) {
-        for index in offsets {
-            let event = events[index]
-            guard !event.isReadOnly,
-                  RecordDeletionPolicy.canDeleteEvent(
-                    event.id,
-                    transactions: transactions,
-                    depositAllocations: depositAllocations,
-                    reimbursements: reimbursements,
-                    memberEntries: memberEntries,
-                    feeSchedules: feeSchedules,
-                    participants: participants,
-                    closeouts: closeouts,
-                    closeoutAllocations: closeoutAllocations,
-                    financialEntries: eventEntries
-                  ) else {
-                deletionMessage = "This event is synchronized or referenced by roster, fee, reimbursement, member-ledger, close-out, or financial records and cannot be deleted."
-                continue
-            }
+        guard let index = offsets.first else { return }
+        let event = events[index]
+        guard !event.isReadOnly,
+              RecordDeletionPolicy.canDeleteEvent(
+                event.id,
+                transactions: transactions,
+                depositAllocations: depositAllocations,
+                reimbursements: reimbursements,
+                memberEntries: memberEntries,
+                feeSchedules: feeSchedules,
+                participants: participants,
+                closeouts: closeouts,
+                closeoutAllocations: closeoutAllocations,
+                financialEntries: eventEntries
+              ) else {
+            deletionMessage = "This event is synchronized or referenced by roster, fee, reimbursement, member-ledger, close-out, or financial records and cannot be deleted."
+            return
+        }
+        pendingDeletion = event
+    }
+
+    private func deleteEvent(_ event: EventRecord) {
+        do {
             AuditLogger.record(
                 .delete,
                 recordType: "Event",
@@ -321,6 +338,10 @@ struct EventListView: View {
                 in: modelContext
             )
             modelContext.delete(event)
+            pendingDeletion = nil
+            try modelContext.save()
+        } catch {
+            deletionMessage = "The event could not be deleted: \(error.localizedDescription)"
         }
     }
 }
@@ -785,6 +806,11 @@ struct EventDetailView: View {
             )
             modelContext.delete(participant)
         }
+        do {
+            try modelContext.save()
+        } catch {
+            notesError = "The roster change could not be saved: \(error.localizedDescription)"
+        }
     }
 }
 
@@ -899,6 +925,23 @@ struct EventFormView: View {
         }
     }
 
+    private func snapshot(_ record: EventRecord) -> [(String, String)] {
+        [
+            ("Name", record.name),
+            ("Category", record.category),
+            ("Classification", record.classification.rawValue),
+            ("Start", record.startDate.formatted(date: .numeric, time: record.isAllDay ? .omitted : .shortened)),
+            ("End", record.endDate.formatted(date: .numeric, time: record.isAllDay ? .omitted : .shortened)),
+            ("Registration deadline", record.registrationDeadline?.formatted(date: .numeric, time: .shortened) ?? ""),
+            ("Location", record.mapSearchQuery),
+            ("Coordinator", record.coordinator),
+            ("Status", record.status.rawValue),
+            ("Capacity", String(record.capacity)),
+            ("Budgeted income", Money.currency(cents: record.budgetIncomeCents)),
+            ("Budgeted expenses", Money.currency(cents: record.budgetExpenseCents)),
+        ]
+    }
+
     private var canSave: Bool {
         guard let income = Money.cents(from: budgetIncome), let expense = Money.cents(from: budgetExpense) else { return false }
         return (try? EventDraftPolicy.validate(
@@ -928,6 +971,7 @@ struct EventFormView: View {
                 budgetExpenseCents: expense
             )
             let record = event ?? EventRecord(name: name, startDate: startDate, endDate: endDate)
+            let before = event.map(snapshot)
             record.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
             record.category = category.trimmingCharacters(in: .whitespacesAndNewlines)
             record.classification = classification
@@ -960,7 +1004,7 @@ struct EventFormView: View {
                 ("Location", record.mapSearchQuery),
                 ("Budgeted income", Money.currency(cents: record.budgetIncomeCents)),
                 ("Budgeted expenses", Money.currency(cents: record.budgetExpenseCents)),
-                ]),
+                ] + (before.map { AuditLogger.changes(from: $0, to: snapshot(record)) } ?? [])),
                 in: modelContext
             )
             try modelContext.save()

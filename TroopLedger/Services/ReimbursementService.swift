@@ -261,7 +261,15 @@ enum ReimbursementService {
             recordType: "Reimbursement Attachment",
             recordID: attachment.id,
             summary: "Removed receipt from reimbursement",
-            details: AuditLogger.details([("Request ID", request.id.uuidString), ("Filename", attachment.filename)]),
+            // Record the fingerprint of the evidence that was removed, not only its name, so a later
+            // reviewer can tell exactly which file left the request.
+            details: AuditLogger.details([
+                ("Request ID", request.id.uuidString),
+                ("Filename", attachment.filename),
+                ("Media type", attachment.mediaType),
+                ("Bytes", String(attachment.byteCount)),
+                ("SHA-256", attachment.sha256),
+            ]),
             in: modelContext
         )
         modelContext.delete(attachment)

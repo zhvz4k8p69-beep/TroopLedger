@@ -11,6 +11,7 @@ struct AccountListView: View {
     @State private var showingNewAccount = false
     @State private var accountToEdit: AccountRecord?
     @State private var accountMessage: String?
+    @State private var pendingDeletion: AccountRecord?
 
     var body: some View {
         Group {
@@ -67,6 +68,17 @@ struct AccountListView: View {
         }
         .sheet(isPresented: $showingNewAccount) { AccountFormView() }
         .sheet(item: $accountToEdit) { AccountFormView(account: $0) }
+        .confirmationDialog(
+            "Delete this account?",
+            isPresented: Binding(get: { pendingDeletion != nil }, set: { if !$0 { pendingDeletion = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { account in
+            Button("Delete \(account.name)", role: .destructive) { deleteAccount(account) }
+            Button("Cancel", role: .cancel) { pendingDeletion = nil }
+        } message: { account in
+            Text("\(account.name) has no transactions and will be removed permanently.")
+        }
         .alert("Accounts", isPresented: Binding(
             get: { accountMessage != nil }, set: { if !$0 { accountMessage = nil } }
         )) { Button("OK") { accountMessage = nil } } message: { Text(accountMessage ?? "") }
@@ -81,18 +93,23 @@ struct AccountListView: View {
     }
 
     private func deleteAccounts(at offsets: IndexSet) {
-        for index in offsets {
-            let account = accounts[index]
-            guard RecordDeletionPolicy.canDeleteAccount(
-                account.id,
-                transactions: transactions,
-                reconciliations: reconciliations,
-                depositBatches: depositBatches,
-                spreadsheetImports: spreadsheetImports
-            ) else {
-                accountMessage = "This account is referenced by transactions, reconciliations, deposit batches, or import history and cannot be deleted. Mark it inactive instead."
-                continue
-            }
+        guard let index = offsets.first else { return }
+        let account = accounts[index]
+        guard RecordDeletionPolicy.canDeleteAccount(
+            account.id,
+            transactions: transactions,
+            reconciliations: reconciliations,
+            depositBatches: depositBatches,
+            spreadsheetImports: spreadsheetImports
+        ) else {
+            accountMessage = "This account is referenced by transactions, reconciliations, deposit batches, or import history and cannot be deleted. Mark it inactive instead."
+            return
+        }
+        pendingDeletion = account
+    }
+
+    private func deleteAccount(_ account: AccountRecord) {
+        do {
             AuditLogger.record(
                 .delete,
                 recordType: "Account",
@@ -106,6 +123,10 @@ struct AccountListView: View {
                 in: modelContext
             )
             modelContext.delete(account)
+            pendingDeletion = nil
+            try modelContext.save()
+        } catch {
+            accountMessage = "The account could not be deleted: \(error.localizedDescription)"
         }
     }
 }
@@ -115,6 +136,8 @@ struct AccountFormView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \AccountRecord.name) private var accounts: [AccountRecord]
     @Query private var reconciliations: [ReconciliationRecord]
+    @Query private var transactions: [LedgerTransaction]
+    @Query private var depositBatches: [DepositBatchRecord]
     private let account: AccountRecord?
     @State private var name: String
     @State private var institution: String
@@ -142,6 +165,12 @@ struct AccountFormView: View {
                     TextField("Bank or institution", text: $institution)
                     Picker("Type", selection: $kind) {
                         ForEach(AccountKind.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .disabled(kindIsLocked)
+                    if kindIsLocked {
+                        Text("The account type is fixed once transactions or deposit batches reference this account, because cash, Undeposited Funds, and bank balances are reported differently.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                     if kind == .undepositedFunds {
                         Text("This holding account is for cash and checks awaiting a bank deposit. TroopLedger permits one Undeposited Funds account and reports it separately from Cash on Hand.")
@@ -177,15 +206,34 @@ struct AccountFormView: View {
         guard let account else { return false }
         return !ReconciliationPolicy.canEditOpeningBalance(account, reconciliations: reconciliations)
     }
+    /// Changing an account's type after it holds activity silently re-classifies cash (for example turning the
+    /// Undeposited Funds holding account into a bank account), so it is frozen once anything references it.
+    private var kindIsLocked: Bool {
+        guard let account else { return false }
+        return transactions.contains { $0.accountID == account.id }
+            || depositBatches.contains { $0.undepositedFundsAccountID == account.id || $0.destinationAccountID == account.id }
+    }
+
+    private func snapshot(_ record: AccountRecord) -> [(String, String)] {
+        [
+            ("Name", record.name),
+            ("Institution", record.institution),
+            ("Type", record.kind.rawValue),
+            ("Opening balance", Money.currency(cents: record.openingBalanceCents)),
+            ("Active", record.isActive ? "Yes" : "No"),
+            ("Notes", record.notes),
+        ]
+    }
 
     private func save() {
         guard let cents = Money.cents(from: openingBalance) else { return }
         do {
             try UndepositedFundsService.validateUnique(kind: kind, editingAccountID: account?.id, accounts: accounts)
             let record = account ?? AccountRecord(name: name)
+            let before = account.map(snapshot)
             record.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
             record.institution = institution.trimmingCharacters(in: .whitespacesAndNewlines)
-            record.kind = kind
+            if !kindIsLocked { record.kind = kind }
             if !openingBalanceIsLocked {
                 record.openingBalanceCents = cents
             }
@@ -203,7 +251,7 @@ struct AccountFormView: View {
                     ("Institution", record.institution),
                     ("Opening balance", Money.currency(cents: record.openingBalanceCents)),
                     ("Active", record.isActive ? "Yes" : "No"),
-                ]),
+                ] + (before.map { AuditLogger.changes(from: $0, to: snapshot(record)) } ?? [])),
                 in: modelContext
             )
             try modelContext.save()

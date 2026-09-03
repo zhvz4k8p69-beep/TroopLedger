@@ -46,11 +46,13 @@ struct FamilyStatementSnapshot {
 enum FamilyStatementError: LocalizedError, Equatable {
     case noMembers
     case invalidPeriod
+    case asOfDateInFuture
 
     var errorDescription: String? {
         switch self {
         case .noMembers: "Assign at least one person to this family before creating a statement."
         case .invalidPeriod: "The statement start date must be on or before its as-of date."
+        case .asOfDateInFuture: "A statement cannot be dated in the future; future charges would be presented as amounts already due."
         }
     }
 }
@@ -65,7 +67,8 @@ enum FamilyStatementService {
         asOfDate: Date,
         troopProfile: TroopProfileRecord? = nil,
         generatedAt: Date = Date(),
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        now: Date = Date()
     ) throws -> FamilyStatementSnapshot {
         let members = people
             .filter { $0.familyID == family.id }
@@ -75,6 +78,7 @@ enum FamilyStatementService {
         let start = calendar.startOfDay(for: periodStart)
         let asOf = calendar.startOfDay(for: asOfDate)
         guard start <= asOf else { throw FamilyStatementError.invalidPeriod }
+        guard asOf <= calendar.startOfDay(for: now) else { throw FamilyStatementError.asOfDateInFuture }
         guard let dayAfterAsOf = calendar.date(byAdding: .day, value: 1, to: asOf) else {
             throw FamilyStatementError.invalidPeriod
         }

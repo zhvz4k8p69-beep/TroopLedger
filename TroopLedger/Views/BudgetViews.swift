@@ -329,6 +329,11 @@ private struct BudgetEditorView: View {
 
     private func save() {
         guard canSave else { return }
+        // Approved revisions are dated, read-only snapshots; nothing that reaches this editor may rewrite one.
+        guard budget.status == .working else {
+            errorMessage = "Approved budget revisions cannot be edited. Change the working budget and approve a new revision."
+            return
+        }
         let modifiedAt = Date()
         for category in editableCategories {
             let cents = Money.cents(from: amounts[category.id] ?? "") ?? 0

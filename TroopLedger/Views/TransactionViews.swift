@@ -17,6 +17,7 @@ struct TransactionListView: View {
     @State private var presentation = TransactionPresentation.bankRegister
     @State private var selectedTransactionID: UUID?
     @State private var deletionMessage: String?
+    @State private var pendingDeletion: LedgerTransaction?
 
     private var filtered: [LedgerTransaction] {
         guard !searchText.isEmpty else { return transactions }
@@ -72,6 +73,19 @@ struct TransactionListView: View {
         }
         .sheet(isPresented: $showingNewTransaction) { TransactionFormView() }
         .sheet(item: $transactionToEdit) { TransactionFormView(transaction: $0) }
+        .confirmationDialog(
+            "Delete this transaction?",
+            isPresented: Binding(get: { pendingDeletion != nil }, set: { if !$0 { pendingDeletion = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { transaction in
+            Button("Delete \(Money.currency(cents: transaction.amountCents)) \(transaction.direction.rawValue.lowercased())", role: .destructive) {
+                deleteTransaction(transaction)
+            }
+            Button("Cancel", role: .cancel) { pendingDeletion = nil }
+        } message: { transaction in
+            Text("\(transaction.payee.isEmpty ? transaction.category : transaction.payee) on \(transaction.date.formatted(date: .long, time: .omitted)) will be removed from the register. This cannot be undone; only the audit log will record it.")
+        }
         .alert("Transactions", isPresented: Binding(
             get: { deletionMessage != nil },
             set: { if !$0 { deletionMessage = nil } }
@@ -323,7 +337,7 @@ struct TransactionListView: View {
         .simultaneousGesture(TapGesture(count: 2).onEnded { transactionToEdit = transaction })
         .contextMenu {
             Button("Edit Transaction", systemImage: "pencil") { transactionToEdit = transaction }
-            Button("Delete Transaction", systemImage: "trash", role: .destructive) { deleteTransaction(transaction) }
+            Button("Delete Transaction", systemImage: "trash", role: .destructive) { requestDeletion(transaction) }
                 .disabled(transactionIsProtected(transaction))
         }
     }
@@ -355,7 +369,7 @@ struct TransactionListView: View {
                     inspectorField("Audit status", transactionIsProtected(transaction) ? "Locked or batch-protected" : "Editable")
 
                     HStack {
-                        Button("Delete", systemImage: "trash", role: .destructive) { deleteTransaction(transaction) }
+                        Button("Delete", systemImage: "trash", role: .destructive) { requestDeletion(transaction) }
                             .disabled(transactionIsProtected(transaction))
                         Spacer()
                         Button("Edit", systemImage: "pencil") { transactionToEdit = transaction }
@@ -410,10 +424,17 @@ struct TransactionListView: View {
     }
 
     private func deleteTransactions(at offsets: IndexSet) {
-        for index in offsets {
-            let transaction = filtered[index]
-            deleteTransaction(transaction)
+        // Swipe-to-delete on a financial record needs a confirmation step; queue the first item.
+        guard let index = offsets.first else { return }
+        requestDeletion(filtered[index])
+    }
+
+    private func requestDeletion(_ transaction: LedgerTransaction) {
+        guard !transactionIsProtected(transaction) else {
+            deletionMessage = "This transaction is locked or referenced by a deposit, reimbursement, member-ledger entry, or adjustment and cannot be deleted."
+            return
         }
+        pendingDeletion = transaction
     }
 
     private func transactionIsProtected(_ transaction: LedgerTransaction) -> Bool {
@@ -450,6 +471,12 @@ struct TransactionListView: View {
             selectedTransactionID = filtered.first(where: { $0.id != transaction.id })?.id
         }
         modelContext.delete(transaction)
+        pendingDeletion = nil
+        do {
+            try modelContext.save()
+        } catch {
+            deletionMessage = "The transaction could not be deleted: \(error.localizedDescription)"
+        }
     }
 }
 
@@ -619,6 +646,12 @@ private struct TransactionEditorView: View {
     @State private var isCleared: Bool
     @State private var adjustmentReason: String
     @State private var preparedAdjustmentDate = false
+    @State private var errorMessage: String?
+
+    /// Archived accounts stay out of the picker unless the record being edited already lives there.
+    private var selectableAccounts: [AccountRecord] {
+        accounts.filter { $0.isActive || $0.id == transaction?.accountID || $0.id == adjustedTransaction?.accountID }
+    }
 
     init(transaction: LedgerTransaction? = nil, adjusting adjustedTransaction: LedgerTransaction? = nil) {
         self.transaction = transaction
@@ -676,7 +709,8 @@ private struct TransactionEditorView: View {
             isAdjustment: isAdjustment,
             adjustsTransactionID: adjustmentTargetID,
             adjustmentReason: adjustmentReason,
-            reconciliations: reconciliations
+            reconciliations: reconciliations,
+            activeAccountIDs: Set(selectableAccounts.map(\.id))
         )
     }
 
@@ -703,7 +737,7 @@ private struct TransactionEditorView: View {
                 Section("Transaction") {
                     Picker("Account", selection: $accountID) {
                         Text("Choose an account").tag(nil as UUID?)
-                        ForEach(accounts) { Text($0.name).tag($0.id as UUID?) }
+                        ForEach(selectableAccounts) { Text($0.isActive ? $0.name : "\($0.name) (inactive)").tag($0.id as UUID?) }
                     }
                     .disabled(isAdjustment)
                     DatePicker("Date", selection: $date, displayedComponents: .date)
@@ -750,6 +784,9 @@ private struct TransactionEditorView: View {
             .onAppear(perform: prepareDefaults)
         }
         .frame(minWidth: 470, minHeight: 620)
+        .alert("Transaction", isPresented: Binding(
+            get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
+        )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
     }
 
     private var navigationTitle: String {
@@ -764,6 +801,8 @@ private struct TransactionEditorView: View {
             return nil
         case .accountRequired:
             return "Choose an account."
+        case .inactiveAccount:
+            return "That account is inactive. Reactivate it in Accounts or choose an active account."
         case .locked(let lockDate):
             return "This account is locked through \(lockDate.formatted(date: .long, time: .omitted)). Use a later date."
         case .adjustmentTargetRequired:
@@ -781,7 +820,7 @@ private struct TransactionEditorView: View {
 
     private func prepareDefaults() {
         _ = try? CategoryCatalog.seedMissingDefinitions(in: modelContext)
-        if accountID == nil { accountID = accounts.first?.id }
+        if accountID == nil { accountID = accounts.first(where: { $0.isActive && $0.kind == .checking })?.id ?? accounts.first(where: \.isActive)?.id }
         guard adjustedTransaction != nil, !preparedAdjustmentDate else { return }
         date = PeriodLocking.firstUnlockedDate(
             for: accountID,
@@ -862,7 +901,12 @@ private struct TransactionEditorView: View {
             ] + changes),
             in: modelContext
         )
-        dismiss()
+        do {
+            try modelContext.save()
+            dismiss()
+        } catch {
+            errorMessage = "The transaction could not be saved: \(error.localizedDescription)"
+        }
     }
 }
 

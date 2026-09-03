@@ -136,7 +136,7 @@ private struct BatchDepositBuilderView: View {
                         Text("Choose a bank account").tag(nil as UUID?)
                         ForEach(destinations) { Text($0.name).tag($0.id as UUID?) }
                     }
-                    DatePicker("Deposit date", selection: $depositDate, displayedComponents: .date)
+                    DatePicker("Deposit date", selection: $depositDate, in: ...Date(), displayedComponents: .date)
                     TextField("Deposit reference", text: $reference)
                     TextField("Notes", text: $notes, axis: .vertical)
                 }

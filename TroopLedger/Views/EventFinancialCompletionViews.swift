@@ -274,7 +274,7 @@ struct EventCloseoutView: View {
                     }
                 }
                 Section("Post Close-out") {
-                    DatePicker("Close date", selection: $closeDate, displayedComponents: [.date])
+                    DatePicker("Close date", selection: $closeDate, in: ...Date(), displayedComponents: [.date])
                     Toggle("Post final-cost member adjustments", isOn: $postAdjustments)
                     Text("When enabled, each rostered member receives one balance increase or decrease for the difference between their recorded fee and actual per-participant cost. Guests remain in the close-out without a member-ledger entry.")
                         .font(.footnote).foregroundStyle(.secondary)
@@ -283,6 +283,12 @@ struct EventCloseoutView: View {
                 }
             } else {
                 Section { Text("Add a registered, attended, or no-show participant before closing this event.").foregroundStyle(.secondary) }
+            }
+            if existing == nil, preview != nil, Calendar.current.startOfDay(for: event.endDate) > Calendar.current.startOfDay(for: Date()) {
+                Section {
+                    Label("This event ends \(event.endDate.formatted(date: .abbreviated, time: .omitted)). It can be closed out once it has ended.", systemImage: "clock")
+                        .foregroundStyle(.orange)
+                }
             }
         }
         .pageHeader(title: "Event Close-out")

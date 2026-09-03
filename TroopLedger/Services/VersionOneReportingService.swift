@@ -202,7 +202,10 @@ enum TreasurerReportService {
 
     private static func annualReport(for transactions: [LedgerTransaction]) -> AnnualReport {
         func totals(_ direction: TransactionDirection) -> [CategoryTotal] {
-            Dictionary(grouping: transactions.filter { $0.direction == direction }, by: { $0.category.isEmpty ? "Uncategorized" : $0.category })
+            Dictionary(grouping: transactions.filter { $0.direction == direction }, by: { transaction in
+                let name = transaction.category.trimmingCharacters(in: .whitespacesAndNewlines)
+                return name.isEmpty ? "Uncategorized" : name
+            })
                 .map { CategoryTotal(category: $0.key, amountCents: $0.value.reduce(Int64(0)) { $0 + $1.amountCents }) }
                 .sorted { $0.category.localizedStandardCompare($1.category) == .orderedAscending }
         }

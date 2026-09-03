@@ -47,9 +47,11 @@ struct AuditLogView: View {
                         AuditLogRow(entry: entry)
                     }
                 }
-                .searchable(text: $searchText, prompt: "Summary, details, record, device, or user")
             }
         }
+        // Attached to the container rather than the list: when a search matched nothing, the list (and the
+        // search field with it) disappeared, leaving no way to clear the search.
+        .searchable(text: $searchText, prompt: "Summary, details, record, device, or user")
         .pageHeader(title: "Audit Log")
     }
 }
