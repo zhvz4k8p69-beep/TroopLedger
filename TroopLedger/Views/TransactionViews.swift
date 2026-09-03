@@ -600,8 +600,14 @@ struct TransactionFormView: View {
 
 private struct BatchProtectedTransactionView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \AccountRecord.name) private var accounts: [AccountRecord]
+    @Query(sort: \ReconciliationRecord.statementDate, order: .reverse) private var reconciliations: [ReconciliationRecord]
     let transaction: LedgerTransaction
+    @State private var confirmingDeletion = false
+    @State private var errorMessage: String?
+
+    private var isManualTransfer: Bool { transaction.isTransfer && transaction.depositBatchID == nil }
 
     var body: some View {
         NavigationStack {
@@ -627,12 +633,37 @@ private struct BatchProtectedTransactionView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 }
+                if isManualTransfer {
+                    Section {
+                        Button("Delete Both Sides of This Transfer", systemImage: "trash", role: .destructive) { confirmingDeletion = true }
+                        Text("A transfer entered by mistake is removed from both accounts together. Transfers in a reconciled period cannot be deleted.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .formStyle(.grouped)
-            .navigationTitle(transaction.depositBatchID == nil && transaction.isTransfer ? "Account Transfer" : "Deposit Transaction")
+            .navigationTitle(isManualTransfer ? "Account Transfer" : "Deposit Transaction")
             .toolbar { Button("Done") { dismiss() } }
         }
         .frame(minWidth: 460, minHeight: 420)
+        .confirmationDialog("Delete this transfer from both accounts?", isPresented: $confirmingDeletion, titleVisibility: .visible) {
+            Button("Delete Transfer", role: .destructive) { deleteTransfer() }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Transfer", isPresented: Binding(
+            get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
+        )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
+    }
+
+    private func deleteTransfer() {
+        guard let groupID = transaction.transferGroupID else { return }
+        do {
+            try AccountTransferService.delete(transferGroupID: groupID, reconciliations: reconciliations, in: modelContext)
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -645,6 +676,8 @@ private struct TransactionEditorView: View {
     @Query(sort: \ReconciliationRecord.statementDate, order: .reverse) private var reconciliations: [ReconciliationRecord]
     @Query(sort: \LedgerCategoryRecord.sortOrder) private var categoryDefinitions: [LedgerCategoryRecord]
     @Query private var allTransactions: [LedgerTransaction]
+    @Query private var reimbursements: [ReimbursementRequest]
+    @Query private var memberEntries: [MemberLedgerEntry]
     private let transaction: LedgerTransaction?
     private let adjustedTransaction: LedgerTransaction?
     @State private var accountID: UUID?
@@ -661,6 +694,13 @@ private struct TransactionEditorView: View {
     @State private var adjustmentReason: String
     @State private var preparedAdjustmentDate = false
     @State private var errorMessage: String?
+
+    /// True when another money record (a paid reimbursement or a member payment) points at this entry.
+    private var isLinkedMoneyRecord: Bool {
+        guard let transaction else { return false }
+        return reimbursements.contains { $0.linkedTransactionID == transaction.id }
+            || memberEntries.contains { $0.accountTransactionID == transaction.id }
+    }
 
     /// Archived accounts stay out of the picker unless the record being edited already lives there.
     private var selectableAccounts: [AccountRecord] {
@@ -748,6 +788,13 @@ private struct TransactionEditorView: View {
                     }
                 }
 
+                if isLinkedMoneyRecord {
+                    Section {
+                        Label("This entry backs a reimbursement payment or a member-ledger payment. Its account, type, and amount are fixed; memo, category, and links can still change.", systemImage: "link")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Section("Transaction") {
                     Picker("Account", selection: $accountID) {
                         Text("Choose an account").tag(nil as UUID?)
@@ -877,6 +924,14 @@ private struct TransactionEditorView: View {
         if let account = accounts.first(where: { $0.id == accountID }) {
             do {
                 try HoldingAccountPolicy.validate(account: account, transactions: allTransactions, editing: transaction?.id, direction: direction, amountCents: cents)
+            } catch {
+                errorMessage = error.localizedDescription
+                return
+            }
+        }
+        if let transaction {
+            do {
+                try LinkedTransactionPolicy.validateEdit(of: transaction, newAccountID: accountID, newDirection: direction, newAmountCents: cents, reimbursements: reimbursements, memberEntries: memberEntries)
             } catch {
                 errorMessage = error.localizedDescription
                 return
@@ -1023,7 +1078,8 @@ struct AccountTransferFormView: View {
     @State private var memo = ""
     @State private var errorMessage: String?
 
-    private var activeAccounts: [AccountRecord] { accounts.filter(\.isActive) }
+    /// Undeposited Funds moves only through deposit batches, which preserve receipt allocations.
+    private var activeAccounts: [AccountRecord] { accounts.filter { $0.isActive && $0.kind != .undepositedFunds } }
     private var canSave: Bool {
         fromAccountID != nil && toAccountID != nil && fromAccountID != toAccountID && (Money.cents(from: amount) ?? 0) > 0
     }

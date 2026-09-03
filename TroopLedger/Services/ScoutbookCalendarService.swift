@@ -11,6 +11,7 @@ struct ScoutbookCalendarEvent: Equatable, Sendable {
     let notes: String
     let isAllDay: Bool
     let modifiedAt: Date?
+    var isCancelled: Bool = false
 }
 
 struct CalendarSyncResult: Sendable {
@@ -143,7 +144,12 @@ enum ScoutbookCalendarService {
                 let pair = piece.split(separator: "=", maxSplits: 1).map(String.init)
                 if pair.count == 2 { parameters[pair[0].uppercased()] = pair[1] }
             }
-            current?[name] = (value, parameters)
+            // EXDATE may appear on several lines; a later line must not discard the earlier exclusions.
+            if name == "EXDATE", let existing = current?[name] {
+                current?[name] = (existing.value + "," + value, existing.parameters.merging(parameters) { current, _ in current })
+            } else {
+                current?[name] = (value, parameters)
+            }
         }
 
         var results: [ScoutbookCalendarEvent] = []
@@ -152,7 +158,10 @@ enum ScoutbookCalendarService {
             guard let startProperty = raw["DTSTART"],
                   let parsedStart = parseDate(startProperty.value, parameters: startProperty.parameters) else { continue }
             let endProperty = raw["DTEND"]
-            var end = endProperty.flatMap { parseDate($0.value, parameters: $0.parameters)?.date } ?? parsedStart.date
+            // RFC 5545 allows DURATION in place of DTEND; feeds from Outlook and Google use it.
+            var end = endProperty.flatMap { parseDate($0.value, parameters: $0.parameters)?.date }
+                ?? raw["DURATION"].flatMap { parseDuration($0.value) }.map { parsedStart.date.addingTimeInterval($0) }
+                ?? parsedStart.date
             if endProperty?.parameters["VALUE"]?.uppercased() == "DATE" || parsedStart.isDateOnly {
                 if end > parsedStart.date {
                     end = Calendar.current.date(byAdding: .day, value: -1, to: end) ?? end
@@ -167,14 +176,18 @@ enum ScoutbookCalendarService {
             let recurrenceID = raw["RECURRENCE-ID"].flatMap { parseDate($0.value, parameters: $0.parameters)?.date }
             let uid = raw["UID"]?.value ?? stableID("\(title)|\(parsedStart.date.timeIntervalSince1970)|\(location)")
             let externalID = recurrenceID.map { "\(uid)#\(Int($0.timeIntervalSince1970))" } ?? uid
-            let base = ScoutbookCalendarEvent(externalID: externalID, title: title, startDate: parsedStart.date, endDate: end, location: location, notes: notes, isAllDay: parsedStart.isDateOnly, modifiedAt: modified)
+            let isCancelled = raw["STATUS"]?.value.trimmingCharacters(in: .whitespaces).uppercased() == "CANCELLED"
+            let exclusions = raw["EXDATE"].map { property in
+                property.value.split(separator: ",").compactMap { parseDate(String($0).trimmingCharacters(in: .whitespaces), parameters: property.parameters)?.date }
+            } ?? []
+            let base = ScoutbookCalendarEvent(externalID: externalID, title: title, startDate: parsedStart.date, endDate: end, location: location, notes: notes, isAllDay: parsedStart.isDateOnly, modifiedAt: modified, isCancelled: isCancelled)
             if recurrenceID != nil {
                 // A RECURRENCE-ID VEVENT replaces one occurrence of its series. Hold it aside so it wins
                 // regardless of whether the feed lists it before or after the master event.
                 overrides[externalID] = base
                 continue
             }
-            results.append(contentsOf: expand(base, rule: raw["RRULE"]?.value))
+            results.append(contentsOf: expand(base, rule: raw["RRULE"]?.value, exclusions: exclusions))
             // Every recurring VEVENT can expand to hundreds of records; bound the total so a feed cannot
             // flood the database (and CloudKit) with millions of synchronized events.
             guard results.count + overrides.count <= maximumExpandedEvents else { throw ScoutbookCalendarError.tooManyEvents }
@@ -264,13 +277,15 @@ enum ScoutbookCalendarService {
                 byExternalID[source.externalID] = event
                 inserted += 1
             }
+            // A detached event may carry notes the treasurer typed; do not blank them when the feed has none.
+            let wasDetached = event.calendarSubscriptionID == nil
             event.name = source.title
             event.category = "Scoutbook Calendar"
             event.startDate = source.startDate
             event.endDate = source.endDate
             event.location = source.location
-            event.notes = source.notes
-            if event.closedAt == nil { event.status = .planning }
+            if !(wasDetached && source.notes.isEmpty) { event.notes = source.notes }
+            if event.closedAt == nil { event.status = source.isCancelled ? .cancelled : .planning }
             event.dateIsApproximate = false
             event.sourceSystem = "Scoutbook Calendar"
             event.externalSourceID = source.externalID
@@ -426,7 +441,43 @@ enum ScoutbookCalendarService {
         return result
     }
 
-    private static func expand(_ event: ScoutbookCalendarEvent, rule: String?) -> [ScoutbookCalendarEvent] {
+    /// Parses an RFC 5545 duration such as `PT1H30M`, `P1D`, or `P2W` into seconds.
+    static func parseDuration(_ value: String) -> TimeInterval? {
+        var text = Substring(value.trimmingCharacters(in: .whitespaces).uppercased())
+        var sign: Double = 1
+        if text.hasPrefix("-") { sign = -1; text = text.dropFirst() } else if text.hasPrefix("+") { text = text.dropFirst() }
+        guard text.hasPrefix("P") else { return nil }
+        text = text.dropFirst()
+        var total: Double = 0
+        var number = ""
+        var inTime = false
+        var sawComponent = false
+        for character in text {
+            if character.isNumber { number.append(character); continue }
+            if character == "T" { inTime = true; continue }
+            guard let amount = Double(number) else { return nil }
+            number = ""
+            sawComponent = true
+            switch (character, inTime) {
+            case ("W", false): total += amount * 7 * 86_400
+            case ("D", false): total += amount * 86_400
+            case ("H", true): total += amount * 3_600
+            case ("M", true): total += amount * 60
+            case ("S", true): total += amount
+            default: return nil
+            }
+        }
+        guard number.isEmpty, sawComponent else { return nil }
+        return sign * total
+    }
+
+    private static func expand(_ event: ScoutbookCalendarEvent, rule: String?, exclusions: [Date] = []) -> [ScoutbookCalendarEvent] {
+        let calendarForExclusions = Calendar.current
+        func isExcluded(_ start: Date) -> Bool {
+            exclusions.contains { excluded in
+                event.isAllDay ? calendarForExclusions.isDate(excluded, inSameDayAs: start) : abs(excluded.timeIntervalSince(start)) < 1
+            }
+        }
         guard let rule else { return [event] }
         // A feed line such as `RRULE:FREQ=WEEKLY;FREQ=DAILY` must not trap; keep the first value for a repeated key.
         let values = Dictionary(rule.split(separator: ";").compactMap { component -> (String, String)? in
@@ -452,25 +503,68 @@ enum ScoutbookCalendarService {
         // All-day spans are measured in calendar days; adding raw seconds shifts the end by an hour across a
         // daylight-saving change and drops the last day of a multi-day occurrence.
         let dayCount = calendar.dateComponents([.day], from: calendar.startOfDay(for: event.startDate), to: calendar.startOfDay(for: event.endDate)).day ?? 0
-        var results: [ScoutbookCalendarEvent] = []
-        for index in 0..<count {
-            guard let start = calendar.date(byAdding: component, value: index * interval, to: event.startDate) else { break }
-            if let until, start > until { break }
-            if start > horizon { break }
-            let occurrenceID = "\(event.externalID)#\(Int(start.timeIntervalSince1970))"
+        func occurrence(startingAt start: Date) -> ScoutbookCalendarEvent {
             let end = event.isAllDay
                 ? (calendar.date(byAdding: .day, value: dayCount, to: start) ?? start.addingTimeInterval(duration))
                 : start.addingTimeInterval(duration)
-            results.append(ScoutbookCalendarEvent(
-                externalID: occurrenceID,
+            return ScoutbookCalendarEvent(
+                externalID: "\(event.externalID)#\(Int(start.timeIntervalSince1970))",
                 title: event.title,
                 startDate: start,
                 endDate: end,
                 location: event.location,
                 notes: event.notes,
                 isAllDay: event.isAllDay,
-                modifiedAt: event.modifiedAt
-            ))
+                modifiedAt: event.modifiedAt,
+                isCancelled: event.isCancelled
+            )
+        }
+
+        // Candidate start dates in order. WEEKLY rules may name several weekdays (BYDAY=MO,WE); a rule that
+        // only repeated the DTSTART weekday silently dropped the other meeting nights.
+        let byDays: [Int] = frequency == "WEEKLY"
+            ? (values["BYDAY"] ?? "").split(separator: ",").compactMap { token in
+                let code = token.trimmingCharacters(in: .whitespaces).suffix(2).uppercased()
+                return ["SU": 1, "MO": 2, "TU": 3, "WE": 4, "TH": 5, "FR": 6, "SA": 7][code]
+            }
+            : []
+        func candidates() -> [Date] {
+            var dates: [Date] = []
+            // COUNT sizes the recurrence set before EXDATE removes members from it, so generate exactly
+            // COUNT candidates and let the exclusions thin them out afterwards.
+            if byDays.isEmpty {
+                var index = 0
+                while dates.count < count {
+                    guard let start = calendar.date(byAdding: component, value: index * interval, to: event.startDate) else { break }
+                    if start > horizon || (until.map { start > $0 } ?? false) { break }
+                    dates.append(start)
+                    index += 1
+                }
+                return dates
+            }
+            var week = 0
+            while dates.count < count, week < 2_000 {
+                guard let weekStart = calendar.date(byAdding: .weekOfYear, value: week * interval, to: event.startDate) else { break }
+                var components = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear, .hour, .minute, .second], from: weekStart)
+                var inWeek: [Date] = []
+                for weekday in byDays {
+                    components.weekday = weekday
+                    if let date = calendar.date(from: components), date >= event.startDate { inWeek.append(date) }
+                }
+                let sorted = inWeek.sorted()
+                if let first = sorted.first, first > horizon || (until.map { first > $0 } ?? false) { break }
+                dates.append(contentsOf: sorted.filter { date in date <= horizon && (until.map { date <= $0 } ?? true) })
+                week += 1
+            }
+            return Array(dates.prefix(count))
+        }
+
+        var results: [ScoutbookCalendarEvent] = []
+        for start in candidates() {
+            if let until, start > until { break }
+            if start > horizon { break }
+            if isExcluded(start) { continue }
+            results.append(occurrence(startingAt: start))
         }
         return results.isEmpty ? [event] : results
     }

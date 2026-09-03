@@ -157,7 +157,7 @@ struct ReimbursementEditorView: View {
                 Section("Request") {
                     Picker("Requester", selection: $requesterPersonID) {
                         Text("Choose a person").tag(nil as UUID?)
-                        ForEach(people) { Text($0.displayName).tag($0.id as UUID?) }
+                        ForEach(people.filter { $0.isActive || $0.id == request?.requesterPersonID }) { Text($0.displayName).tag($0.id as UUID?) }
                     }
                     DatePicker("Purchase date", selection: $purchaseDate, displayedComponents: .date)
                     TextField("Business purpose", text: $purpose, axis: .vertical)
@@ -507,6 +507,7 @@ private struct ReimbursementReviewView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \PersonRecord.lastName) private var people: [PersonRecord]
     @Query(sort: \DisbursementControlSettings.modifiedAt, order: .reverse) private var controlSettings: [DisbursementControlSettings]
+    @Query private var allAttachments: [ReimbursementAttachment]
     let request: ReimbursementRequest
     @State private var reviewerName = AuditIdentity.current.userIdentity
     @State private var approverPersonID: UUID?
@@ -514,8 +515,10 @@ private struct ReimbursementReviewView: View {
     @State private var notes = ""
     @State private var errorMessage: String?
 
-    private var adults: [PersonRecord] { people.filter { $0.role != .scout && $0.isActive } }
+    /// Active adults other than the requester; approving one's own request is refused by the service as well.
+    private var adults: [PersonRecord] { people.filter { $0.role != .scout && $0.isActive && $0.id != request.requesterPersonID } }
     private var controlPolicy: DisbursementControlPolicy { DisbursementControlPolicy(settings: controlSettings.first) }
+    private var hasReceipt: Bool { allAttachments.contains { $0.requestID == request.id } }
 
     var body: some View {
         NavigationStack {
@@ -533,7 +536,12 @@ private struct ReimbursementReviewView: View {
                     } else {
                         TextField("Reviewer name", text: $reviewerName)
                     }
-                    TextField("Review notes", text: $notes, axis: .vertical)
+                    TextField(hasReceipt ? "Review notes" : "Review notes (required to approve without a receipt)", text: $notes, axis: .vertical)
+                    if !hasReceipt {
+                        Label("No receipt is attached. To approve anyway, record why the request is acceptable without one.", systemImage: "exclamationmark.triangle")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
                 }
                 Section {
                     Text(controlPolicy.isEnabled

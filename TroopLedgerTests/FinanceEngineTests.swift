@@ -2989,7 +2989,7 @@ final class FinanceEngineTests: XCTestCase {
             XCTAssertEqual(error as? ReimbursementError, .selfApproval)
         }
         XCTAssertEqual(request.status, .submitted)
-        XCTAssertNoThrow(try ReimbursementService.review(request, approve: true, reviewerName: "Sam Chair", notes: "", approver: .init(personID: UUID(), name: "Sam Chair", household: ""), in: context))
+        XCTAssertNoThrow(try ReimbursementService.review(request, approve: true, reviewerName: "Sam Chair", notes: "Receipt verified", approver: .init(personID: UUID(), name: "Sam Chair", household: ""), in: context))
     }
 
     @MainActor
@@ -3123,5 +3123,194 @@ final class FinanceEngineTests: XCTestCase {
         let forecast = RecharterForecastService.makeSnapshot(programYear: "2027", people: [parent, scout, other], registrations: [], accounts: [], transactions: [], perPersonCostCents: 7_500, unitCharterCostCents: 0, otherCostCents: 0, expectedCollectionsCents: 0)
         XCTAssertEqual(forecast.activePersonCount, 1)
         XCTAssertEqual(forecast.projectedRegistrationCostCents, 7_500)
+    }
+
+    // MARK: - Regression tests for the sixth audit round
+
+    @MainActor
+    func testApprovalWithoutAReceiptRequiresAWrittenJustification() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let request = ReimbursementRequest(requesterPersonID: UUID(), purchaseDate: Date(), purpose: "Supplies", category: "Program Supplies", amountCents: 1_000)
+        context.insert(request)
+        try context.save()
+        XCTAssertThrowsError(try ReimbursementService.review(request, approve: true, reviewerName: "Sam Chair", notes: "", in: context)) { error in
+            XCTAssertEqual(error as? ReimbursementError, .receiptJustificationRequired)
+        }
+        XCTAssertEqual(request.status, .submitted)
+        try ReimbursementService.review(request, approve: true, reviewerName: "Sam Chair", notes: "Receipt lost; purchase confirmed with vendor", in: context)
+        XCTAssertEqual(request.status, .approved)
+    }
+
+    func testLinkedMoneyRecordsKeepTheirMoneyFieldsFixed() {
+        let transaction = LedgerTransaction(accountID: UUID(), date: Date(), direction: .expense, amountCents: 5_000, payee: "Pat", category: "Supplies")
+        let request = ReimbursementRequest(requesterPersonID: UUID(), purchaseDate: Date(), purpose: "Supplies", category: "Supplies", amountCents: 5_000)
+        request.linkedTransactionID = transaction.id
+        XCTAssertThrowsError(try LinkedTransactionPolicy.validateEdit(of: transaction, newAccountID: transaction.accountID, newDirection: .expense, newAmountCents: 50_000, reimbursements: [request], memberEntries: [])) { error in
+            XCTAssertEqual(error as? LinkedTransactionValidationError, .linkedToReimbursement)
+        }
+        XCTAssertNoThrow(try LinkedTransactionPolicy.validateEdit(of: transaction, newAccountID: transaction.accountID, newDirection: .expense, newAmountCents: 5_000, reimbursements: [request], memberEntries: []))
+        let entry = MemberLedgerEntry(personID: UUID(), date: Date(), kind: .payment, amountCents: 5_000, category: "Dues")
+        entry.accountTransactionID = transaction.id
+        XCTAssertThrowsError(try LinkedTransactionPolicy.validateEdit(of: transaction, newAccountID: UUID(), newDirection: .expense, newAmountCents: 5_000, reimbursements: [], memberEntries: [entry])) { error in
+            XCTAssertEqual(error as? LinkedTransactionValidationError, .linkedToMemberPayment)
+        }
+    }
+
+    func testApprovalReportFlagsPaymentsDatedBeforeThePurchase() {
+        let transaction = LedgerTransaction(accountID: UUID(), date: Date(timeIntervalSince1970: 1_756_000_000), direction: .expense, amountCents: 1_000, payee: "Pat", category: "Supplies")
+        let request = ReimbursementRequest(requesterPersonID: UUID(), purchaseDate: Date(timeIntervalSince1970: 1_756_800_000), purpose: "Supplies", category: "Supplies", amountCents: 1_000)
+        request.status = .paid
+        request.reviewerName = "Sam"
+        request.reviewedAt = Date()
+        request.linkedTransactionID = transaction.id
+        let report = ReimbursementApprovalReportService.makeReport(requests: [request], attachments: [], transactions: [transaction], people: [], auditEntries: [], policy: DisbursementControlPolicy(isEnabled: false))
+        XCTAssertTrue(report.rows.first?.issues.contains { $0.message.contains("before the purchase") } == true)
+    }
+
+    @MainActor
+    func testDepositRejectsReceiptsDatedAfterTheDepositDate() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let undeposited = AccountRecord(name: "Undeposited Funds", kind: .undepositedFunds)
+        let checking = AccountRecord(name: "Checking", kind: .checking)
+        let receipt = LedgerTransaction(accountID: undeposited.id, date: Date(), direction: .income, amountCents: 1_000, payee: "Family", category: "Dues")
+        context.insert(undeposited); context.insert(checking); context.insert(receipt)
+        try context.save()
+        XCTAssertThrowsError(try BatchDepositService.post(destinationAccountID: checking.id, depositDate: Date().addingTimeInterval(-3 * 86_400), reference: "", notes: "", sourceTransactionIDs: [receipt.id], sourceCashReceiptIDs: [], reconciliations: [], in: context)) { error in
+            XCTAssertEqual(error as? BatchDepositError, .receiptAfterDepositDate)
+        }
+    }
+
+    @MainActor
+    func testTransfersRefuseUndepositedFundsAndOverdrawnCashBoxesAndCanBeDeletedTogether() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let undeposited = AccountRecord(name: "Undeposited Funds", kind: .undepositedFunds)
+        let cashBox = AccountRecord(name: "Cash Box", kind: .cash, openingBalanceCents: 2_000)
+        let checking = AccountRecord(name: "Checking", kind: .checking, openingBalanceCents: 10_000)
+        context.insert(undeposited); context.insert(cashBox); context.insert(checking)
+        try context.save()
+        XCTAssertThrowsError(try AccountTransferService.post(fromAccountID: undeposited.id, toAccountID: checking.id, date: Date(), amountCents: 100, reference: "", memo: "", reconciliations: [], in: context)) { error in
+            XCTAssertEqual(error as? AccountTransferError, .undepositedFundsNotAllowed)
+        }
+        XCTAssertThrowsError(try AccountTransferService.post(fromAccountID: cashBox.id, toAccountID: checking.id, date: Date(), amountCents: 5_000, reference: "", memo: "", reconciliations: [], in: context)) { error in
+            if case .wouldOverdraw = error as? AccountTransferError {} else { XCTFail("expected overdraw, got \(error)") }
+        }
+        let pair = try AccountTransferService.post(fromAccountID: cashBox.id, toAccountID: checking.id, date: Date(), amountCents: 1_500, reference: "", memo: "Bank run", reconciliations: [], in: context)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<LedgerTransaction>()).count, 2)
+        try AccountTransferService.delete(transferGroupID: try XCTUnwrap(pair.outgoing.transferGroupID), reconciliations: [], in: context)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<LedgerTransaction>()).count, 0)
+        XCTAssertNotNil(try context.fetch(FetchDescriptor<AuditLogEntry>()).first { $0.summary.hasPrefix("Deleted transfer") })
+    }
+
+    @MainActor
+    func testCloseoutRejectsCloseDatesBeforeTheEventEnded() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let event = EventRecord(name: "Campout", startDate: Date().addingTimeInterval(-3 * 86_400), endDate: Date().addingTimeInterval(-86_400))
+        let participant = EventParticipant(eventID: event.id, personID: nil, status: .registered)
+        participant.guestName = "Guest"
+        context.insert(event); context.insert(participant)
+        let preview = try EventCloseoutService.makePreview(event: event, participants: [participant], people: [], transactions: [], financialEntries: [])
+        XCTAssertThrowsError(try EventCloseoutService.post(preview: preview, event: event, closeDate: Date().addingTimeInterval(-5 * 86_400), notes: "", postMemberAdjustments: false, existingCloseouts: [], in: context)) { error in
+            XCTAssertEqual(error as? EventCloseoutError, .closeDateBeforeEventEnd)
+        }
+    }
+
+    func testCalendarFeedMarksCancelledEventsAndHonorsExclusionsAndDurations() throws {
+        let ics = """
+        BEGIN:VCALENDAR
+        BEGIN:VEVENT
+        UID:cancelled-1
+        DTSTART:20260915T190000Z
+        DURATION:PT1H30M
+        STATUS:CANCELLED
+        SUMMARY:Cancelled Meeting
+        END:VEVENT
+        BEGIN:VEVENT
+        UID:series-2
+        DTSTART:20260901T190000Z
+        DTEND:20260901T200000Z
+        RRULE:FREQ=WEEKLY;COUNT=4
+        EXDATE:20260908T190000Z
+        EXDATE:20260915T190000Z,20260922T190000Z
+        SUMMARY:Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """
+        let events = try ScoutbookCalendarService.parse(data: Data(ics.utf8))
+        let cancelled = try XCTUnwrap(events.first { $0.title == "Cancelled Meeting" })
+        XCTAssertTrue(cancelled.isCancelled)
+        XCTAssertEqual(cancelled.endDate.timeIntervalSince(cancelled.startDate), 5_400)
+        let meetings = events.filter { $0.title == "Meeting" }
+        XCTAssertEqual(meetings.count, 1)
+        XCTAssertEqual(meetings.first?.startDate, Date(timeIntervalSince1970: 1_788_289_200))
+        XCTAssertEqual(ScoutbookCalendarService.parseDuration("P1DT2H"), 93_600)
+        XCTAssertEqual(ScoutbookCalendarService.parseDuration("P2W"), 1_209_600)
+        XCTAssertNil(ScoutbookCalendarService.parseDuration("1H"))
+    }
+
+    func testWeeklyRulesExpandEveryListedWeekday() throws {
+        let ics = """
+        BEGIN:VCALENDAR
+        BEGIN:VEVENT
+        UID:mw-1
+        DTSTART:20260907T190000Z
+        DTEND:20260907T200000Z
+        RRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=4
+        SUMMARY:Patrol Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """
+        let events = try ScoutbookCalendarService.parse(data: Data(ics.utf8)).sorted { $0.startDate < $1.startDate }
+        XCTAssertEqual(events.count, 4)
+        let weekdays = events.map { Calendar(identifier: .gregorian).component(.weekday, from: $0.startDate) }
+        XCTAssertEqual(weekdays, [2, 4, 2, 4])
+        XCTAssertEqual(events[1].startDate.timeIntervalSince(events[0].startDate), 2 * 86_400)
+    }
+
+    @MainActor
+    func testReattachingADetachedEventKeepsLocalNotesWhenTheFeedHasNone() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let subscription = ExternalCalendarSubscription(name: "Troop", feedURLString: "https://example.com/feed.ics")
+        let detached = EventRecord(name: "Campout", startDate: Date(), endDate: Date())
+        detached.sourceSystem = "Scoutbook Calendar"
+        detached.externalSourceID = "camp-9"
+        detached.notes = "Bring the trailer"
+        context.insert(subscription); context.insert(detached)
+        try context.save()
+        let feed = [ScoutbookCalendarEvent(externalID: "camp-9", title: "Campout", startDate: Date(), endDate: Date(), location: "", notes: "", isAllDay: true, modifiedAt: nil)]
+        _ = try ScoutbookCalendarService.apply(feedEvents: feed, to: subscription, in: context)
+        XCTAssertEqual(detached.notes, "Bring the trailer")
+        let cancelledFeed = [ScoutbookCalendarEvent(externalID: "camp-9", title: "Campout", startDate: Date(), endDate: Date(), location: "", notes: "", isAllDay: true, modifiedAt: nil, isCancelled: true)]
+        _ = try ScoutbookCalendarService.apply(feedEvents: cancelledFeed, to: subscription, in: context)
+        XCTAssertEqual(detached.status, .cancelled)
+    }
+
+    func testBankTypeColumnsWithRealWorldVocabularyAreUnderstood() throws {
+        let csv = "Date,Amount,Type\n9/1/2026,12.50,ACH Debit\n9/1/2026,30.00,POS Purchase\n9/2/2026,5.00,Interest Paid\n9/2/2026,40.00,Credit Card Payment\n9/3/2026,15.00,ACH Credit\n"
+        let document = try GeneralSpreadsheetImporter.parse(data: Data(csv.utf8), sourceName: "bank.csv")
+        let preview = GeneralSpreadsheetImporter.preview(document: document, mapping: TransactionColumnMapping.detected(from: document.headers), accountID: UUID(), defaultDirection: .income, defaultCategory: "Dues", reconciliations: [])
+        let directions = preview.rows.compactMap { $0.draft?.direction }
+        XCTAssertEqual(directions, [.expense, .expense, .income, .expense, .income], preview.invalidRows.flatMap(\.issues).joined(separator: "; "))
+    }
+
+    func testPackageFingerprintDerivesFromTheManifest() throws {
+        let files: [String: Data] = ["a.txt": Data("a".utf8)]
+        var withManifest = files
+        withManifest["manifest-sha256.csv"] = CommitteeReportPackageService.manifest(for: files)
+        let fingerprint = CommitteeReportPackageService.fingerprint(of: withManifest)
+        XCTAssertEqual(fingerprint.count, 64)
+        XCTAssertEqual(CommitteeReportPackageService.fingerprint(of: files), "")
+    }
+
+    func testStorageOpenReportsFailuresInsteadOfCrashing() {
+        // The in-memory path must succeed; the on-disk path returns a Result the app can present.
+        XCTAssertNoThrow(try ModelContainerFactory.makeInMemoryContainer())
+        if case .failure(let error) = ModelContainerFactory.openCloudContainer() {
+            XCTAssertFalse(String(describing: error).isEmpty)
+        }
     }
 }

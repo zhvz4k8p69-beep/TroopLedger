@@ -167,6 +167,7 @@ enum ReimbursementError: LocalizedError, Equatable {
     case transactionBelongsToAnotherPerson
     case requestNotReopenable
     case reopenReasonRequired
+    case receiptJustificationRequired
 
     var errorDescription: String? {
         switch self {
@@ -194,6 +195,7 @@ enum ReimbursementError: LocalizedError, Equatable {
         case .transactionBelongsToAnotherPerson: "That ledger entry is linked to a different person and cannot pay this request."
         case .requestNotReopenable: "Only an approved-but-unpaid or declined request can be returned for review."
         case .reopenReasonRequired: "Explain why this decision is being reopened."
+        case .receiptJustificationRequired: "No receipt is attached. Approve only after recording in the review notes why the request is acceptable without one."
         }
     }
 }
@@ -304,6 +306,14 @@ enum ReimbursementService {
         // Advisory warnings cover look-alike names; a definitive roster match is refused outright.
         if approve, let approverID = approver?.personID, approverID == request.requesterPersonID {
             throw ReimbursementError.selfApproval
+        }
+        // Approval without evidence is sometimes legitimate (a lost receipt for a small purchase), but the
+        // reason must be written down at the moment of approval, not reconstructed later.
+        if approve, reason.isEmpty {
+            let attachments = try modelContext.fetch(FetchDescriptor<ReimbursementAttachment>())
+            if !attachments.contains(where: { $0.requestID == request.id }) {
+                throw ReimbursementError.receiptJustificationRequired
+            }
         }
         request.status = approve ? .approved : .declined
         request.reviewerName = reviewer

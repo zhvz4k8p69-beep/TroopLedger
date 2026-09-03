@@ -131,6 +131,10 @@ enum ReimbursementApprovalReportService {
                 if request.status == .submitted || request.status == .declined {
                     issues.append(.init(kind: .transaction, message: "A non-payable request has a linked payment transaction."))
                 }
+                let calendar = Calendar.current
+                if calendar.startOfDay(for: transaction.date) < calendar.startOfDay(for: request.purchaseDate) {
+                    issues.append(.init(kind: .transaction, message: "The linked payment is dated before the purchase it reimburses."))
+                }
             }
 
             return makeRow(

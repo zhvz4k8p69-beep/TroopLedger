@@ -335,6 +335,43 @@ enum HoldingAccountPolicy {
     }
 }
 
+enum LinkedTransactionValidationError: LocalizedError, Equatable {
+    case linkedToReimbursement
+    case linkedToMemberPayment
+
+    var errorDescription: String? {
+        switch self {
+        case .linkedToReimbursement: "This entry pays a reimbursement request. Its account, type, and amount are fixed; reopen or re-record the reimbursement instead."
+        case .linkedToMemberPayment: "This entry is the bank receipt behind a member-ledger payment. Its account, type, and amount are fixed while that link exists."
+        }
+    }
+}
+
+enum LinkedTransactionPolicy {
+    /// A transaction that another money record points at (a paid reimbursement, a member payment's bank
+    /// receipt) may still get a better memo or category, but its money fields must not drift away from the
+    /// record that relies on them.
+    static func validateEdit(
+        of transaction: LedgerTransaction,
+        newAccountID: UUID?,
+        newDirection: TransactionDirection,
+        newAmountCents: Int64,
+        reimbursements: [ReimbursementRequest],
+        memberEntries: [MemberLedgerEntry]
+    ) throws {
+        let moneyChanged = transaction.accountID != newAccountID
+            || transaction.direction != newDirection
+            || transaction.amountCents != newAmountCents
+        guard moneyChanged else { return }
+        if reimbursements.contains(where: { $0.linkedTransactionID == transaction.id }) {
+            throw LinkedTransactionValidationError.linkedToReimbursement
+        }
+        if memberEntries.contains(where: { $0.accountTransactionID == transaction.id }) {
+            throw LinkedTransactionValidationError.linkedToMemberPayment
+        }
+    }
+}
+
 /// Decides when the optional device lock engages. Kept free of UI so the rule can be tested.
 enum AppLockPolicy {
     static let storageKey = "security.requiresDeviceAuthentication"

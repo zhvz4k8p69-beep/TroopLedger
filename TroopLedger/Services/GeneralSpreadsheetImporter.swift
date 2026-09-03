@@ -453,10 +453,17 @@ enum GeneralSpreadsheetImporter {
 
     private static func parsedDirection(_ value: String) -> TransactionDirection? {
         let normalized = normalizeHeader(value)
-        let income = ["income", "deposit", "credit", "receipt", "received", "in"]
-        let expense = ["expense", "withdrawal", "debit", "check", "payment", "out"]
+        let income = ["income", "deposit", "credit", "receipt", "received", "in", "cr"]
+        let expense = ["expense", "withdrawal", "debit", "check", "payment", "out", "dr"]
         if income.contains(normalized) { return .income }
         if expense.contains(normalized) { return .expense }
+        // Bank "Type" columns rarely say just "debit": "ACH Debit", "POS Purchase", "Check Card Payment",
+        // "Interest Paid", "Credit Card Payment". Expense words win so "credit card payment" is an expense.
+        let lower = value.lowercased()
+        let expenseWords = ["debit", "withdraw", "purchase", "pos ", "payment", "check", "fee", "charge", "bill pay", "transfer out"]
+        let incomeWords = ["credit", "deposit", "interest", "refund", "dividend", "income", "received", "transfer in", "reversal"]
+        if expenseWords.contains(where: lower.contains) { return .expense }
+        if incomeWords.contains(where: lower.contains) { return .income }
         return nil
     }
 

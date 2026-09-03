@@ -294,6 +294,13 @@ enum CommitteeReportPackageService {
         return String(format: "TroopLedger Committee Snapshot %04d-%02d-%02d.troopledgercommittee", components.year ?? 0, components.month ?? 0, components.day ?? 0)
     }
 
+    /// A short identifier for an exported package: the SHA-256 of its manifest, which in turn covers every
+    /// other file. Recorded in the audit log so a specific export can be matched to the file that was handed over.
+    static func fingerprint(of files: [String: Data]) -> String {
+        guard let manifest = files["manifest-sha256.csv"] else { return "" }
+        return SHA256.hash(data: manifest).map { String(format: "%02x", $0) }.joined()
+    }
+
     static func manifest(for files: [String: Data]) -> Data {
         let rows = [["path", "byte_count", "sha256"]] + files.sorted { $0.key < $1.key }.map { path, data in
             [path, String(data.count), SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()]

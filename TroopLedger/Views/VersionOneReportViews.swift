@@ -16,6 +16,7 @@ struct TreasurerReportCenterView: View {
     @State private var packageDocument: TroopLedgerPackageDocument?
     @State private var pdfFilename = "Treasurer Report.pdf"
     @State private var packageFilename = "Committee Snapshot.troopledgercommittee"
+    @State private var packageFingerprint = ""
     @State private var showingPDFExporter = false
     @State private var showingPackageExporter = false
     @State private var message: String?
@@ -102,8 +103,10 @@ struct TreasurerReportCenterView: View {
 
     private func preparePackage() {
         do {
-            packageDocument = TroopLedgerPackageDocument(files: try CommitteeReportPackageService.makeFiles(report: report, transactions: transactions))
+            let files = try CommitteeReportPackageService.makeFiles(report: report, transactions: transactions)
+            packageDocument = TroopLedgerPackageDocument(files: files)
             packageFilename = CommitteeReportPackageService.defaultFilename(for: report)
+            packageFingerprint = CommitteeReportPackageService.fingerprint(of: files)
             showingPackageExporter = true
         } catch { message = "The committee snapshot could not be created: \(error.localizedDescription)" }
     }
@@ -111,7 +114,7 @@ struct TreasurerReportCenterView: View {
     private func complete(_ result: Result<URL, Error>, kind: String) {
         switch result {
         case .success(let url):
-            AuditLogger.record(.export, recordType: "Treasurer Report", recordID: nil, summary: "Exported \(kind)", details: AuditLogger.details([("File", url.lastPathComponent), ("Period", "\(month.0.formatted(date: .numeric, time: .omitted)) through \(month.1.formatted(date: .numeric, time: .omitted))")]), in: modelContext)
+            AuditLogger.record(.export, recordType: "Treasurer Report", recordID: nil, summary: "Exported \(kind)", details: AuditLogger.details([("File", url.lastPathComponent), ("Period", "\(month.0.formatted(date: .numeric, time: .omitted)) through \(month.1.formatted(date: .numeric, time: .omitted))"), ("Manifest SHA-256", kind == "committee snapshot" ? packageFingerprint : nil)]), in: modelContext)
             do {
                 try modelContext.save()
                 message = "Exported \(url.lastPathComponent)."
@@ -135,6 +138,7 @@ struct AnnualAuditExportView: View {
     @State private var selectedYear = ReportingYearBasis.schoolYear.startingYear(containing: Date())
     @State private var document: TroopLedgerPackageDocument?
     @State private var filename = "Annual Audit.troopledgeraudit"
+    @State private var fingerprint = ""
     @State private var showingExporter = false
     @State private var message: String?
 
@@ -173,8 +177,10 @@ struct AnnualAuditExportView: View {
     private func prepare() {
         do {
             try modelContext.save()
-            document = TroopLedgerPackageDocument(files: try AnnualAuditPackageService.makeFiles(from: modelContext, period: period))
+            let files = try AnnualAuditPackageService.makeFiles(from: modelContext, period: period)
+            document = TroopLedgerPackageDocument(files: files)
             filename = AnnualAuditPackageService.defaultFilename(for: period)
+            fingerprint = CommitteeReportPackageService.fingerprint(of: files)
             showingExporter = true
         } catch { message = "The audit package could not be prepared: \(error.localizedDescription)" }
     }
@@ -182,7 +188,7 @@ struct AnnualAuditExportView: View {
     private func complete(_ result: Result<URL, Error>) {
         switch result {
         case .success(let url):
-            AuditLogger.record(.export, recordType: "Annual Audit Package", recordID: nil, summary: "Exported annual audit and treasurer-turnover package", details: AuditLogger.details([("File", url.lastPathComponent), ("School year", period.label)]), in: modelContext)
+            AuditLogger.record(.export, recordType: "Annual Audit Package", recordID: nil, summary: "Exported annual audit and treasurer-turnover package", details: AuditLogger.details([("File", url.lastPathComponent), ("School year", period.label), ("Manifest SHA-256", fingerprint)]), in: modelContext)
             do {
                 try modelContext.save()
                 message = "Exported \(url.lastPathComponent)."

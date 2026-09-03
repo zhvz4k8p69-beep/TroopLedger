@@ -14,6 +14,7 @@ enum BatchDepositError: LocalizedError, Equatable {
     case undepositedPeriodLocked(Date)
     case destinationPeriodLocked(Date)
     case depositDateInFuture
+    case receiptAfterDepositDate
 
     var errorDescription: String? {
         switch self {
@@ -29,6 +30,7 @@ enum BatchDepositError: LocalizedError, Equatable {
         case .undepositedPeriodLocked(let date): "Undeposited Funds is locked through \(date.formatted(date: .long, time: .omitted)). Choose a later deposit date."
         case .destinationPeriodLocked(let date): "The destination account is locked through \(date.formatted(date: .long, time: .omitted)). Choose a later deposit date."
         case .depositDateInFuture: "A deposit cannot be dated in the future. Record it on the day the bank received it."
+        case .receiptAfterDepositDate: "One of the selected receipts is dated after the deposit date. Money cannot be deposited before it was received."
         }
     }
 }
@@ -112,6 +114,11 @@ enum BatchDepositService {
         guard selectedTransactions.allSatisfy({ $0.amountCents > 0 }),
               selectedReceipts.allSatisfy({ $0.amountCents > 0 }) else {
             throw BatchDepositError.invalidReceiptAmount
+        }
+        let depositDay = calendar.startOfDay(for: depositDate)
+        guard selectedTransactions.allSatisfy({ calendar.startOfDay(for: $0.date) <= depositDay }),
+              selectedReceipts.allSatisfy({ calendar.startOfDay(for: $0.date) <= depositDay }) else {
+            throw BatchDepositError.receiptAfterDepositDate
         }
 
         for receipt in selectedReceipts {
@@ -296,9 +303,15 @@ enum AccountTransferError: LocalizedError, Equatable {
     case dateInFuture
     case sourceLocked(Date)
     case destinationLocked(Date)
+    case undepositedFundsNotAllowed
+    case wouldOverdraw(String)
+    case notDeletable
 
     var errorDescription: String? {
         switch self {
+        case .undepositedFundsNotAllowed: "Undeposited Funds only moves through deposit batches, which keep every receipt allocation. Use New Deposit instead of a transfer."
+        case .wouldOverdraw(let message): message
+        case .notDeletable: "This transfer is part of a deposit batch or a reconciled period and cannot be deleted."
         case .sourceRequired: "Choose the account the money leaves."
         case .destinationRequired: "Choose the account the money enters."
         case .sameAccount: "Choose two different accounts."
@@ -339,6 +352,16 @@ enum AccountTransferService {
               let destination = accounts.first(where: { $0.id == toAccountID && $0.isActive }) else {
             throw AccountTransferError.inactiveAccount
         }
+        guard source.kind != .undepositedFunds, destination.kind != .undepositedFunds else {
+            throw AccountTransferError.undepositedFundsNotAllowed
+        }
+        // A cash box cannot send more than it holds.
+        let existingTransactions = try modelContext.fetch(FetchDescriptor<LedgerTransaction>())
+        do {
+            try HoldingAccountPolicy.validate(account: source, transactions: existingTransactions, editing: nil, direction: .expense, amountCents: amountCents)
+        } catch {
+            throw AccountTransferError.wouldOverdraw(error.localizedDescription)
+        }
         if let lock = PeriodLocking.latestLockDate(for: source.id, reconciliations: reconciliations, calendar: calendar),
            calendar.startOfDay(for: date) <= lock {
             throw AccountTransferError.sourceLocked(lock)
@@ -376,5 +399,38 @@ enum AccountTransferService {
         )
         try modelContext.save()
         return (outgoing, incoming)
+    }
+
+    /// Removes both sides of a manual transfer entered by mistake. Deposit-batch legs and legs in a
+    /// reconciled period stay protected.
+    static func delete(transferGroupID: UUID, reconciliations: [ReconciliationRecord], calendar: Calendar = .current, in modelContext: ModelContext) throws {
+        let transactions = try modelContext.fetch(FetchDescriptor<LedgerTransaction>())
+        let legs = transactions.filter { $0.transferGroupID == transferGroupID && $0.isTransfer }
+        let reimbursements = try modelContext.fetch(FetchDescriptor<ReimbursementRequest>())
+        let memberEntries = try modelContext.fetch(FetchDescriptor<MemberLedgerEntry>())
+        let allocations = try modelContext.fetch(FetchDescriptor<DepositAllocationRecord>())
+        let batches = try modelContext.fetch(FetchDescriptor<DepositBatchRecord>())
+        guard !legs.isEmpty,
+              legs.allSatisfy({ leg in
+                  leg.depositBatchID == nil
+                      && !PeriodLocking.isLocked(leg, reconciliations: reconciliations, calendar: calendar)
+                      && RecordDeletionPolicy.canDeleteTransaction(leg.id, transactions: transactions, depositAllocations: allocations, depositBatches: batches, reimbursements: reimbursements, memberEntries: memberEntries)
+              }) else {
+            throw AccountTransferError.notDeletable
+        }
+        let accounts = try modelContext.fetch(FetchDescriptor<AccountRecord>())
+        let description = legs.map { leg in
+            "\(accounts.first { $0.id == leg.accountID }?.name ?? "Unknown account") \(Money.currency(cents: leg.signedAmountCents))"
+        }.joined(separator: "; ")
+        AuditLogger.record(
+            .delete,
+            recordType: "Account Transfer",
+            recordID: transferGroupID,
+            summary: "Deleted transfer \(Money.currency(cents: legs.first?.amountCents ?? 0)) between troop accounts",
+            details: AuditLogger.details([("Date", legs.first?.date.formatted(date: .numeric, time: .omitted)), ("Legs", description), ("Memo", legs.first?.memo)]),
+            in: modelContext
+        )
+        legs.forEach { modelContext.delete($0) }
+        try modelContext.save()
     }
 }

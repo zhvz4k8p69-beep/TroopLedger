@@ -34,7 +34,9 @@ enum ModelContainerFactory {
         AuditLogEntry.self,
     ]
 
-    static func makeCloudContainer() -> ModelContainer {
+    /// Opens the on-disk store. A failure (corrupt store, migration error, full disk) used to `fatalError`,
+    /// which put the app into a crash loop with no explanation; callers now receive the error and can show it.
+    static func openCloudContainer() -> Result<ModelContainer, Error> {
         let schema = Schema(modelTypes)
         let configuration = ModelConfiguration(
             "TroopLedger",
@@ -42,10 +44,13 @@ enum ModelContainerFactory {
             isStoredInMemoryOnly: false,
             cloudKitDatabase: .automatic
         )
-        do {
-            return try ModelContainer(for: schema, configurations: configuration)
-        } catch {
-            fatalError("Unable to initialize TroopLedger storage: \(error)")
+        return Result { try ModelContainer(for: schema, configurations: configuration) }
+    }
+
+    static func makeCloudContainer() -> ModelContainer {
+        switch openCloudContainer() {
+        case .success(let container): return container
+        case .failure(let error): fatalError("Unable to initialize TroopLedger storage: \(error)")
         }
     }
 

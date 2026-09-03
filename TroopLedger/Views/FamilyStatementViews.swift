@@ -220,12 +220,18 @@ struct FamilyEditorView: View {
         if isNew { modelContext.insert(record) }
 
         let previousIDs = Set(people.filter { $0.familyID == record.id }.map(\.id))
+        var movedFromOtherFamilies: [String] = []
         for person in people {
             if selectedMemberIDs.contains(person.id) {
+                if let otherFamily = person.familyID, otherFamily != record.id { movedFromOtherFamilies.append(person.displayName) }
                 person.familyID = record.id
             } else if person.familyID == record.id {
                 person.familyID = nil
             }
+        }
+        // Statements follow family membership, so the audit entry names who moved, not only how many.
+        func names(_ ids: Set<UUID>) -> String {
+            people.filter { ids.contains($0.id) }.map(\.displayName).sorted().joined(separator: ", ")
         }
         AuditLogger.record(
             isNew ? .create : .edit,
@@ -233,9 +239,10 @@ struct FamilyEditorView: View {
             recordID: record.id,
             summary: "\(isNew ? "Created" : "Edited") family \(record.name)",
             details: AuditLogger.details([
-                ("Members", selectedMemberIDs.count.description),
-                ("Added", selectedMemberIDs.subtracting(previousIDs).count.description),
-                ("Removed", previousIDs.subtracting(selectedMemberIDs).count.description),
+                ("Members", names(selectedMemberIDs)),
+                ("Added", names(selectedMemberIDs.subtracting(previousIDs))),
+                ("Removed", names(previousIDs.subtracting(selectedMemberIDs))),
+                ("Moved from another family", movedFromOtherFamilies.sorted().joined(separator: ", ")),
             ]),
             in: modelContext
         )

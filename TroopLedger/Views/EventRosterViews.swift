@@ -247,11 +247,18 @@ struct EventRosterBuilderView: View {
 
     private var visibleIDs: Set<UUID> { Set(availablePeople.map(\.id)) }
 
+    /// Distinct new guest names: the same name typed twice, or a guest already on the roster, is added once.
     private var guestNamesToAdd: [String] {
-        guestNames
+        let existing = Set(allParticipants.filter { $0.eventID == event.id && $0.personID == nil }.map { $0.guestName.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) })
+        var seen = existing
+        return guestNames
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+            .filter { name in
+                guard !name.isEmpty, !seen.contains(name.lowercased()) else { return false }
+                seen.insert(name.lowercased())
+                return true
+            }
     }
 
     private var additionCount: Int { effectiveSelection.count + guestNamesToAdd.count }

@@ -314,6 +314,7 @@ struct DisbursementControlSettingsView: View {
     @State private var backupDocument: PlaintextBackupDocument?
     @State private var backupFilename = PlaintextBackupService.defaultFilename()
     @State private var backupRecordCount = 0
+    @State private var backupFingerprint = ""
     @State private var showingBackupExporter = false
     @State private var backupMessage: String?
     @State private var backupError: String?
@@ -523,6 +524,7 @@ struct DisbursementControlSettingsView: View {
             backupDocument = PlaintextBackupDocument(files: archive.files)
             backupFilename = PlaintextBackupService.defaultFilename(at: exportedAt)
             backupRecordCount = archive.recordCounts.values.reduce(0, +)
+            backupFingerprint = CommitteeReportPackageService.fingerprint(of: archive.files)
             showingBackupExporter = true
         } catch {
             backupError = "The backup could not be prepared: \(error.localizedDescription)"
@@ -541,6 +543,7 @@ struct DisbursementControlSettingsView: View {
                     ("File", url.lastPathComponent),
                     ("Records", String(backupRecordCount)),
                     ("Format version", String(PlaintextBackupService.formatVersion)),
+                    ("Manifest SHA-256", backupFingerprint),
                 ]),
                 in: modelContext
             )
@@ -621,7 +624,7 @@ struct DisbursementControlEditorView: View {
     /// Departed leaders stay off the evidence pickers; an already-recorded identity remains selectable.
     private var adults: [PersonRecord] {
         let recorded: Set<UUID?> = [approverPersonID, signerOnePersonID, signerTwoPersonID]
-        return people.filter { $0.role != .scout && ($0.isActive || recorded.contains($0.id)) }
+        return people.filter { $0.role != .scout && $0.id != request.requesterPersonID && ($0.isActive || recorded.contains($0.id)) }
     }
 
     var body: some View {
