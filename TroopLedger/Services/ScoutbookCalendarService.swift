@@ -567,6 +567,15 @@ enum ScoutbookCalendarService {
                 return ["SU": 1, "MO": 2, "TU": 3, "WE": 4, "TH": 5, "FR": 6, "SA": 7][code]
             }
             : []
+        // MONTHLY rules such as "the second Tuesday" (BYDAY=2TU) or "the last Friday" (BYDAY=-1FR).
+        let monthlyWeekdays: [(ordinal: Int, weekday: Int)] = frequency == "MONTHLY"
+            ? (values["BYDAY"] ?? "").split(separator: ",").compactMap { token in
+                let text = token.trimmingCharacters(in: .whitespaces).uppercased()
+                guard text.count >= 3, let weekday = ["SU": 1, "MO": 2, "TU": 3, "WE": 4, "TH": 5, "FR": 6, "SA": 7][String(text.suffix(2))],
+                      let ordinal = Int(text.dropLast(2)), ordinal != 0, abs(ordinal) <= 5 else { return nil }
+                return (ordinal, weekday)
+            }
+            : []
         // MONTHLY rules such as "the 1st and 15th" or "the last day" (BYMONTHDAY=-1).
         let byMonthDays: [Int] = frequency == "MONTHLY"
             ? (values["BYMONTHDAY"] ?? "").split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }.filter { $0 != 0 && abs($0) <= 31 }
@@ -575,6 +584,34 @@ enum ScoutbookCalendarService {
             var dates: [Date] = []
             // COUNT sizes the recurrence set before EXDATE removes members from it, so generate exactly
             // COUNT candidates and let the exclusions thin them out afterwards.
+            if !monthlyWeekdays.isEmpty {
+                var month = 0
+                let timeParts = calendar.dateComponents([.hour, .minute, .second], from: event.startDate)
+                while dates.count < count, month < 1_200 {
+                    guard let monthStart = calendar.date(byAdding: .month, value: month * interval, to: calendar.date(from: calendar.dateComponents([.year, .month], from: event.startDate)) ?? event.startDate),
+                          let dayRange = calendar.range(of: .day, in: .month, for: monthStart) else { break }
+                    var inMonth: [Date] = []
+                    for rule in monthlyWeekdays {
+                        // Collect every matching weekday in the month, then take the nth from the front or back.
+                        var matches: [Date] = []
+                        for day in dayRange {
+                            var components = calendar.dateComponents([.year, .month], from: monthStart)
+                            components.day = day
+                            components.hour = timeParts.hour
+                            components.minute = timeParts.minute
+                            components.second = timeParts.second
+                            if let date = calendar.date(from: components), calendar.component(.weekday, from: date) == rule.weekday { matches.append(date) }
+                        }
+                        let index = rule.ordinal > 0 ? rule.ordinal - 1 : matches.count + rule.ordinal
+                        if matches.indices.contains(index), matches[index] >= event.startDate { inMonth.append(matches[index]) }
+                    }
+                    let sorted = inMonth.sorted()
+                    if let first = sorted.first, first > horizon || (until.map { first > $0 } ?? false) { break }
+                    dates.append(contentsOf: sorted.filter { date in date <= horizon && (until.map { date <= $0 } ?? true) })
+                    month += 1
+                }
+                return Array(dates.prefix(count))
+            }
             if !byMonthDays.isEmpty {
                 var month = 0
                 let timeParts = calendar.dateComponents([.hour, .minute, .second], from: event.startDate)

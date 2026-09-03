@@ -13,6 +13,7 @@ struct DashboardView: View {
     @Query(sort: \ReconciliationRecord.statementDate, order: .reverse) private var reconciliations: [ReconciliationRecord]
     @Query private var reimbursements: [ReimbursementRequest]
     @Query private var reimbursementAttachments: [ReimbursementAttachment]
+    @Query private var depositAllocations: [DepositAllocationRecord]
     @Query(sort: \OperatingBudgetRecord.modifiedAt, order: .reverse) private var budgets: [OperatingBudgetRecord]
     @Query private var budgetLines: [BudgetLineRecord]
     @State private var showingNewTransaction = false
@@ -55,6 +56,16 @@ struct DashboardView: View {
     private var submittedReimbursements: [ReimbursementRequest] {
         reimbursements.filter { $0.status == .submitted }
     }
+    /// Cash and checks that have sat in Undeposited Funds for two weeks or more.
+    private var oldestUndepositedAgeDays: Int? {
+        let holdingIDs = Set(accounts.filter { $0.kind == .undepositedFunds }.map(\.id))
+        let allocated = Set(depositAllocations.compactMap(\.sourceTransactionID))
+        let waiting = transactions.filter { $0.accountID.map(holdingIDs.contains) == true && $0.direction == .income && !$0.isTransfer && !allocated.contains($0.id) }
+        guard let oldest = waiting.map(\.date).min() else { return nil }
+        return Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: oldest), to: Calendar.current.startOfDay(for: Date())).day
+    }
+    private var undepositedIsStale: Bool { (oldestUndepositedAgeDays ?? 0) >= 14 }
+
     private var missingReceiptCount: Int {
         let attachedRequestIDs = Set(reimbursementAttachments.compactMap(\.requestID))
         return submittedReimbursements.filter { !attachedRequestIDs.contains($0.id) }.count
@@ -271,6 +282,9 @@ struct DashboardView: View {
                     if !unclearedTransactions.isEmpty {
                         attentionRow(title: "\(unclearedTransactions.count) uncleared transactions", detail: oldestUnclearedDescription, systemImage: "clock.arrow.circlepath", destination: .reconcile)
                     }
+                    if undepositedIsStale, let days = oldestUndepositedAgeDays {
+                        attentionRow(title: "Cash held undeposited for \(days) days", detail: Money.currency(cents: cashPosition.undepositedFundsCents) + " awaiting deposit", systemImage: "tray.full", destination: .deposits)
+                    }
                     if outstandingMemberBalances > 0 {
                         attentionRow(title: "Member balances are outstanding", detail: Money.currency(cents: outstandingMemberBalances) + " total", systemImage: "person.crop.circle.badge.exclamationmark", destination: .people)
                     }
@@ -286,7 +300,7 @@ struct DashboardView: View {
     }
 
     private var attentionCount: Int {
-        [!unclearedTransactions.isEmpty, outstandingMemberBalances > 0, missingReceiptCount > 0, !reconciliationIsCurrent]
+        [!unclearedTransactions.isEmpty, undepositedIsStale, outstandingMemberBalances > 0, missingReceiptCount > 0, !reconciliationIsCurrent]
             .filter { $0 }.count
     }
 

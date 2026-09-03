@@ -17,6 +17,18 @@ struct EventListView: View {
     @State private var presentation = EventPresentation.calendar
     @State private var deletionMessage: String?
     @State private var pendingDeletion: EventRecord?
+    @State private var searchText = ""
+
+    private var listedEvents: [EventRecord] {
+        guard !searchText.isEmpty else { return events }
+        return events.filter {
+            $0.name.localizedCaseInsensitiveContains(searchText)
+                || $0.location.localizedCaseInsensitiveContains(searchText)
+                || $0.address.localizedCaseInsensitiveContains(searchText)
+                || $0.coordinator.localizedCaseInsensitiveContains(searchText)
+                || $0.category.localizedCaseInsensitiveContains(searchText)
+        }
+    }
 
     private var upcomingEvents: [EventRecord] {
         events
@@ -251,7 +263,7 @@ struct EventListView: View {
 
     private var eventList: some View {
         List {
-            ForEach(events) { event in
+            ForEach(listedEvents) { event in
                 NavigationLink {
                     EventDetailView(event: event)
                 } label: {
@@ -283,6 +295,7 @@ struct EventListView: View {
             }
             .onDelete(perform: deleteEvents)
         }
+        .searchable(text: $searchText, prompt: "Name, location, coordinator, or category")
     }
 
     private func eventNet(_ event: EventRecord) -> Int64 {
@@ -304,7 +317,7 @@ struct EventListView: View {
 
     private func deleteEvents(at offsets: IndexSet) {
         guard let index = offsets.first else { return }
-        let event = events[index]
+        let event = listedEvents[index]
         guard !event.isReadOnly,
               RecordDeletionPolicy.canDeleteEvent(
                 event.id,
@@ -679,6 +692,14 @@ struct EventDetailView: View {
                 }
                 if !event.isReadOnly && event.closedAt == nil {
                     Button("Add Participants", systemImage: "person.badge.plus") { showingParticipantPicker = true }
+                }
+            }
+
+            Section("History") {
+                NavigationLink {
+                    AuditHistoryView(recordID: event.id, title: event.name)
+                } label: {
+                    Label("Audit entries for this event", systemImage: "clock.arrow.circlepath")
                 }
             }
 

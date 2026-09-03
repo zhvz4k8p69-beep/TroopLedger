@@ -112,6 +112,9 @@ enum ReimbursementApprovalReportService {
 
             if request.status == .approved && request.linkedTransactionID == nil {
                 issues.append(.init(kind: .transaction, message: "Approved request has no linked payment transaction."))
+                if let reviewedAt = request.reviewedAt, let days = Calendar.current.dateComponents([.day], from: reviewedAt, to: generatedAt).day, days > 30 {
+                    issues.append(.init(kind: .transaction, message: "Approved \(days) days ago and still unpaid."))
+                }
             } else if request.status == .paid && request.linkedTransactionID == nil {
                 issues.append(.init(kind: .transaction, message: "Paid request has no linked payment transaction."))
             } else if let transactionID = request.linkedTransactionID {

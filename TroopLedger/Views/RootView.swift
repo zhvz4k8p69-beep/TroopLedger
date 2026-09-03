@@ -10,11 +10,22 @@ struct AppLockGate: ViewModifier {
     @State private var isLocked = false
     @State private var isAuthenticating = false
     @State private var failureMessage: String?
+    @State private var inactiveSince: Date?
 
     func body(content: Content) -> some View {
         content
+            // Keyboard shortcuts and menu commands must not reach the books while the overlay is up.
+            .disabled(isLocked)
+            .allowsHitTesting(!isLocked)
             .overlay {
                 if isLocked { lockScreen }
+            }
+            .task(id: inactiveSince) {
+                guard let started = inactiveSince else { return }
+                try? await Task.sleep(for: .seconds(AppLockPolicy.inactivityTimeout))
+                if !Task.isCancelled, AppLockPolicy.shouldLockAfterInactivity(isEnabled: requiresAuthentication, inactiveSince: started) {
+                    isLocked = true
+                }
             }
             .onAppear {
                 if requiresAuthentication {
@@ -28,7 +39,11 @@ struct AppLockGate: ViewModifier {
                     if AppLockPolicy.shouldLock(isEnabled: requiresAuthentication, movedToBackground: true, alreadyLocked: isLocked) {
                         isLocked = true
                     }
+                case .inactive:
+                    // On a Mac the app rarely reaches .background; an unattended window goes .inactive.
+                    if requiresAuthentication, inactiveSince == nil { inactiveSince = Date() }
                 case .active:
+                    inactiveSince = nil
                     if isLocked { authenticate() }
                 default:
                     break

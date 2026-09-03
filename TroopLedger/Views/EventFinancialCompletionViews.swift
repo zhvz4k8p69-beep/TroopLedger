@@ -265,6 +265,12 @@ struct EventCloseoutView: View {
                     money("Currently unpaid", preview.unpaidCents)
                     money("Currently refund due", preview.refundDueCents)
                 }
+                if preview.participants.reduce(Int64(0), { $0 + $1.paidCents }) > preview.actualIncomeCents {
+                    Section {
+                        Label("The roster records \(Money.currency(cents: preview.participants.reduce(Int64(0), { $0 + $1.paidCents }))) paid, but only \(Money.currency(cents: preview.actualIncomeCents)) of income is linked to this event. Link the deposits before closing so collected cash is traceable.", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                    }
+                }
                 Section("Frozen Roster Preview") {
                     ForEach(preview.participants) { row in
                         VStack(alignment: .leading, spacing: 5) {

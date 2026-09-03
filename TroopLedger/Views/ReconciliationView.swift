@@ -49,7 +49,7 @@ struct ReconciliationView: View {
                 .disabled(account == nil || statementCents == nil || difference != 0 || !statementDateIsAfterLock || statementDateIsInFuture)
         }
         .onAppear {
-            if accountID == nil { accountID = accounts.first(where: \.isActive)?.id }
+            if accountID == nil { accountID = AccountSelectionPolicy.defaultOperatingAccount(in: accounts)?.id }
             moveStatementDatePastLock()
         }
         .onChange(of: accountID) { _, _ in

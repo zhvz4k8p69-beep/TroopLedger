@@ -482,7 +482,10 @@ enum GeneralSpreadsheetImporter {
         guard !value.isEmpty else { return nil }
         // A `yyyy` pattern accepts a two-digit year ("1/15/24" becomes 15 January 0024) before the `yy`
         // patterns are ever tried, so each candidate must also land in a plausible year.
-        let formats = [
+        // ICU matches punctuation loosely, so "01.09.2026" would satisfy "M/d/yyyy" as January 9. Dotted
+        // values are day-first European dates and get only the dotted patterns.
+        let dotted = value.contains(".") && !value.contains("/") && !value.contains("-")
+        let formats = dotted ? ["dd.MM.yyyy", "d.M.yyyy", "dd.MM.yy"] : [
             "yyyy-MM-dd", "M/d/yyyy", "MM/dd/yyyy", "M/d/yy", "MM/dd/yy", "MMM d, yyyy", "MMMM d, yyyy",
             // Bank and card exports frequently carry a time of day.
             "M/d/yyyy H:mm:ss", "M/d/yyyy H:mm", "M/d/yyyy h:mm a", "M/d/yyyy h:mm:ss a", "M/d/yy H:mm",

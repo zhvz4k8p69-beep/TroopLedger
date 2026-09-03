@@ -346,6 +346,12 @@ enum ScoutbookImporter {
             }
 
             var person = findPerson(memberID: memberID, firstName: name.first, lastName: name.last, in: people)
+            if person == nil, isAmbiguous(memberID: memberID, firstName: name.first, lastName: name.last, in: people) {
+                // Creating a third "Sam Smith" on every import would multiply the duplicate; leave the row for review.
+                skipped += 1
+                issues.append("Row \(row.id): \(name.first) \(name.last) matches more than one person; add the Member ID to the export or merge the duplicates first")
+                continue
+            }
             if person == nil {
                 let created = PersonRecord(firstName: name.first, lastName: name.last, role: .other)
                 created.scoutingMemberID = memberID
@@ -545,6 +551,14 @@ enum ScoutbookImporter {
         guard !target.isEmpty else { return nil }
         let matches = people.filter { normalizedName(firstName: $0.firstName, lastName: $0.lastName) == target }
         return matches.count == 1 ? matches[0] : nil
+    }
+
+    private static func isAmbiguous(memberID: String, firstName: String, lastName: String, in people: [PersonRecord]) -> Bool {
+        let target = normalizedName(firstName: firstName, lastName: lastName)
+        guard !target.isEmpty else { return false }
+        let sameName = people.filter { normalizedName(firstName: $0.firstName, lastName: $0.lastName) == target }
+        if memberID.isEmpty { return sameName.count > 1 }
+        return sameName.filter { $0.scoutingMemberID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count > 1
     }
 
     private static func normalizedName(firstName: String, lastName: String) -> String {

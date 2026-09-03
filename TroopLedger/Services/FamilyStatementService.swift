@@ -157,8 +157,11 @@ enum FamilyStatementService {
         return lhs.id.uuidString < rhs.id.uuidString
     }
 
+    /// Charge and payment notes are the treasurer's working remarks and stay internal; adjustment reasons are
+    /// written for the family and belong on the statement.
     private static func description(for entry: MemberLedgerEntry, eventNamesByID: [UUID: String]) -> String {
-        ([entry.category, entry.eventID.flatMap { eventNamesByID[$0] }, entry.notes] as [String?])
+        let isAdjustment = entry.kind == .adjustmentIncrease || entry.kind == .adjustmentDecrease
+        return ([entry.category, entry.eventID.flatMap { eventNamesByID[$0] }, isAdjustment ? entry.notes : nil] as [String?])
             .compactMap { $0 }
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }

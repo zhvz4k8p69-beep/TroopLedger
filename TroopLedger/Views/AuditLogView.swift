@@ -1,5 +1,31 @@
+import CryptoKit
 import SwiftUI
 import SwiftData
+
+/// The audit entries that mention one record, reachable from that record's own screen.
+struct AuditHistoryView: View {
+    let recordID: UUID
+    let title: String
+    @Query(sort: \AuditLogEntry.timestamp, order: .reverse) private var entries: [AuditLogEntry]
+
+    private var related: [AuditLogEntry] {
+        let text = recordID.uuidString
+        return entries.filter { $0.recordID == recordID || $0.details.localizedCaseInsensitiveContains(text) }
+    }
+
+    var body: some View {
+        List {
+            if related.isEmpty {
+                Text("No audit entries mention this record.").foregroundStyle(.secondary)
+            } else {
+                ForEach(related) { entry in
+                    NavigationLink { AuditLogDetailView(entry: entry) } label: { AuditLogRow(entry: entry) }
+                }
+            }
+        }
+        .pageHeader(title: "History • \(title)")
+    }
+}
 
 struct AuditLogView: View {
     @Environment(\.modelContext) private var modelContext
@@ -9,6 +35,7 @@ struct AuditLogView: View {
     @State private var exportDocument: ReimbursementApprovalCSVDocument?
     @State private var exportFilename = "TroopLedger Audit Log.csv"
     @State private var exportedCount = 0
+    @State private var exportFingerprint = ""
     @State private var showingExporter = false
     @State private var exportMessage: String?
 
@@ -73,14 +100,16 @@ struct AuditLogView: View {
         let components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
         exportFilename = String(format: "TroopLedger Audit Log %04d-%02d-%02d.csv", components.year ?? 0, components.month ?? 0, components.day ?? 0)
         exportedCount = entries.count
-        exportDocument = ReimbursementApprovalCSVDocument(csv: AuditLogger.csv(for: entries))
+        let csv = AuditLogger.csv(for: entries)
+        exportFingerprint = SHA256.hash(data: Data(csv.utf8)).map { String(format: "%02x", $0) }.joined()
+        exportDocument = ReimbursementApprovalCSVDocument(csv: csv)
         showingExporter = true
     }
 
     private func completeExport(_ result: Result<URL, Error>) {
         switch result {
         case .success(let url):
-            AuditLogger.record(.export, recordType: "Audit Log", recordID: nil, summary: "Exported audit log", details: AuditLogger.details([("File", url.lastPathComponent), ("Entries", String(exportedCount))]), in: modelContext)
+            AuditLogger.record(.export, recordType: "Audit Log", recordID: nil, summary: "Exported audit log", details: AuditLogger.details([("File", url.lastPathComponent), ("Entries", String(exportedCount)), ("SHA-256", exportFingerprint)]), in: modelContext)
             do {
                 try modelContext.save()
                 exportMessage = "Exported \(exportedCount) audit entries."
@@ -95,7 +124,7 @@ struct AuditLogView: View {
     }
 }
 
-private struct AuditLogRow: View {
+struct AuditLogRow: View {
     let entry: AuditLogEntry
 
     var body: some View {
@@ -118,7 +147,7 @@ private struct AuditLogRow: View {
     }
 }
 
-private struct AuditLogDetailView: View {
+struct AuditLogDetailView: View {
     let entry: AuditLogEntry
 
     var body: some View {

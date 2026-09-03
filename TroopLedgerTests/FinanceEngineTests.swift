@@ -1,6 +1,8 @@
 import XCTest
+import ImageIO
 import SwiftData
 import SwiftUI
+import UniformTypeIdentifiers
 @testable import TroopLedger
 
 final class FinanceEngineTests: XCTestCase {
@@ -981,7 +983,7 @@ final class FinanceEngineTests: XCTestCase {
         context.insert(requester)
         context.insert(request)
         try context.save()
-        let receiptData = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A])
+        let receiptData = try makeImageData(type: .png)
 
         let attachment = try ReimbursementService.addAttachment(
             to: request,
@@ -1009,7 +1011,8 @@ final class FinanceEngineTests: XCTestCase {
             applicationVersion: "0.11.0-test"
         )
         let attachmentPath = try XCTUnwrap(archive.files.keys.first { $0.hasPrefix("attachments/") })
-        XCTAssertEqual(archive.files[attachmentPath], receiptData)
+        XCTAssertEqual(archive.files[attachmentPath], attachment.data)
+        XCTAssertNotNil(archive.files[attachmentPath].flatMap { CGImageSourceCreateWithData($0 as CFData, nil) })
         XCTAssertEqual(archive.recordCounts["reimbursement_requests"], 1)
         XCTAssertEqual(archive.recordCounts["reimbursement_attachments"], 1)
         XCTAssertEqual(archive.recordCounts["attachments_manifest"], 1)
@@ -2543,7 +2546,7 @@ final class FinanceEngineTests: XCTestCase {
         XCTAssertThrowsError(try ReimbursementService.addAttachment(to: request, data: renamedPDF, filename: "receipt.jpg", mediaType: "image/jpeg", in: context)) { error in
             XCTAssertEqual(error as? ReimbursementError, .receiptTypeUnsupported)
         }
-        let jpeg = Data([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46])
+        let jpeg = try makeImageData(type: .jpeg)
         XCTAssertEqual(try ReimbursementService.addAttachment(to: request, data: jpeg, filename: "receipt.jpg", mediaType: "image/jpeg", in: context).mediaType, "image/jpeg")
     }
 
@@ -2565,7 +2568,7 @@ final class FinanceEngineTests: XCTestCase {
     func testBackupManifestRecomputesAttachmentHashesAndSanitizesPaths() throws {
         let container = try ModelContainerFactory.makeInMemoryContainer()
         let context = ModelContext(container)
-        let data = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A])
+        let data = try makeImageData(type: .png)
         context.insert(ReimbursementAttachment(requestID: UUID(), filename: "../../escape.png", mediaType: "image/png", byteCount: 1, sha256: "stale", data: data))
 
         let archive = try PlaintextBackupService.makeArchive(from: context)
@@ -3434,5 +3437,157 @@ final class FinanceEngineTests: XCTestCase {
         let today = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 9, day: 3, hour: 12)))
         let expected = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 31)))
         XCTAssertEqual(ReconciliationView.endOfPreviousMonth(relativeTo: today, calendar: calendar), expected)
+    }
+
+    // MARK: - Regression tests for the eighth audit round
+
+    /// A real 2x2 image, optionally carrying GPS metadata, encoded with ImageIO.
+    func makeImageData(type: UTType, withGPS: Bool = false) throws -> Data {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let context = try XCTUnwrap(CGContext(data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 8, space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        let image = try XCTUnwrap(context.makeImage())
+        let output = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(output as CFMutableData, type.identifier as CFString, 1, nil))
+        var properties: [CFString: Any] = [:]
+        if withGPS {
+            properties[kCGImagePropertyGPSDictionary] = [kCGImagePropertyGPSLatitude: 42.36, kCGImagePropertyGPSLatitudeRef: "N", kCGImagePropertyGPSLongitude: 71.06, kCGImagePropertyGPSLongitudeRef: "W"]
+            properties[kCGImagePropertyExifDictionary] = [kCGImagePropertyExifUserComment: "photographed at home"]
+        }
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return output as Data
+    }
+
+    @MainActor
+    func testReceiptPhotosLoseTheirLocationMetadata() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let request = ReimbursementRequest(requesterPersonID: UUID(), purchaseDate: Date(), purpose: "Supplies", category: "Program Supplies", amountCents: 500)
+        context.insert(request)
+        let original = try makeImageData(type: .jpeg, withGPS: true)
+        let originalProperties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(XCTUnwrap(CGImageSourceCreateWithData(original as CFData, nil)), 0, nil) as? [CFString: Any])
+        XCTAssertNotNil(originalProperties[kCGImagePropertyGPSDictionary], "fixture must carry GPS data")
+
+        let attachment = try ReimbursementService.addAttachment(to: request, data: original, filename: "IMG_0001.HEIC", mediaType: "image/jpeg", in: context)
+        let storedProperties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(XCTUnwrap(CGImageSourceCreateWithData(attachment.data as CFData, nil)), 0, nil) as? [CFString: Any])
+        XCTAssertNil(storedProperties[kCGImagePropertyGPSDictionary])
+        XCTAssertNil((storedProperties[kCGImagePropertyExifDictionary] as? [CFString: Any])?[kCGImagePropertyExifUserComment])
+        XCTAssertEqual(attachment.mediaType, "image/jpeg")
+        XCTAssertEqual(attachment.filename, "IMG_0001.jpg")
+        XCTAssertEqual(attachment.byteCount, Int64(attachment.data.count))
+    }
+
+    func testAppLockEngagesAfterInactivityOnlyWhenEnabled() {
+        let start = Date()
+        XCTAssertFalse(AppLockPolicy.shouldLockAfterInactivity(isEnabled: true, inactiveSince: start, now: start.addingTimeInterval(60)))
+        XCTAssertTrue(AppLockPolicy.shouldLockAfterInactivity(isEnabled: true, inactiveSince: start, now: start.addingTimeInterval(AppLockPolicy.inactivityTimeout)))
+        XCTAssertFalse(AppLockPolicy.shouldLockAfterInactivity(isEnabled: false, inactiveSince: start, now: start.addingTimeInterval(3_600)))
+        XCTAssertFalse(AppLockPolicy.shouldLockAfterInactivity(isEnabled: true, inactiveSince: nil))
+    }
+
+    func testApprovalReportFlagsStaleUnpaidApprovals() {
+        let request = ReimbursementRequest(requesterPersonID: UUID(), purchaseDate: Date(), purpose: "Supplies", category: "Supplies", amountCents: 1_000)
+        request.status = .approved
+        request.reviewerName = "Sam"
+        request.reviewedAt = Date().addingTimeInterval(-45 * 86_400)
+        let report = ReimbursementApprovalReportService.makeReport(requests: [request], attachments: [], transactions: [], people: [], auditEntries: [], policy: DisbursementControlPolicy(isEnabled: false))
+        XCTAssertTrue(report.rows.first?.issues.contains { $0.message.contains("still unpaid") } == true)
+    }
+
+    func testFamilyStatementsShowAdjustmentReasonsButNotInternalNotes() throws {
+        let family = FamilyRecord(name: "Family")
+        let member = PersonRecord(firstName: "Ava", lastName: "Scout", role: .scout)
+        member.familyID = family.id
+        let charge = MemberLedgerEntry(personID: member.id, date: Date().addingTimeInterval(-86_400), kind: .charge, amountCents: 1_000, category: "Dues")
+        charge.notes = "chase this family"
+        let adjustment = MemberLedgerEntry(personID: member.id, date: Date().addingTimeInterval(-3_600), kind: .adjustmentDecrease, amountCents: 200, category: "Dues")
+        adjustment.notes = "Corrects a double charge"
+        let snapshot = try FamilyStatementService.makeSnapshot(family: family, people: [member], entries: [charge, adjustment], events: [], periodStart: Date().addingTimeInterval(-7 * 86_400), asOfDate: Date())
+        let descriptions = snapshot.activity.map(\.description)
+        XCTAssertFalse(descriptions.contains { $0.contains("chase") })
+        XCTAssertTrue(descriptions.contains { $0.contains("Corrects a double charge") })
+    }
+
+    func testIntegrityCheckReportsCashTraceabilityGaps() {
+        let event = EventRecord(name: "Campout", startDate: Date(), endDate: Date())
+        let participant = EventParticipant(eventID: event.id, personID: UUID(), status: .registered)
+        participant.paidCents = 5_000
+        let payment = MemberLedgerEntry(personID: UUID(), date: Date(), kind: .payment, amountCents: 2_500, category: "Dues")
+        let issues = DataIntegrityService.check(accounts: [], transactions: [], people: [], events: [event], requests: [], entries: [payment], batches: [], allocations: [], participants: [participant], registrations: [], closeouts: [])
+        XCTAssertTrue(issues.contains { $0.area == "Cash traceability" && $0.message.contains("$25.00") })
+        XCTAssertTrue(issues.contains { $0.area == "Cash traceability" && $0.message.contains("Campout") })
+    }
+
+    func testMonthlyRulesHonorNthWeekday() throws {
+        let ics = """
+        BEGIN:VCALENDAR
+        BEGIN:VEVENT
+        UID:committee-1
+        DTSTART:20260908T190000Z
+        DTEND:20260908T203000Z
+        RRULE:FREQ=MONTHLY;BYDAY=2TU;COUNT=3
+        SUMMARY:Committee Meeting
+        END:VEVENT
+        BEGIN:VEVENT
+        UID:last-friday
+        DTSTART:20260925T180000Z
+        DTEND:20260925T190000Z
+        RRULE:FREQ=MONTHLY;BYDAY=-1FR;COUNT=2
+        SUMMARY:Last Friday
+        END:VEVENT
+        END:VCALENDAR
+        """
+        let events = try ScoutbookCalendarService.parse(data: Data(ics.utf8))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let committee = events.filter { $0.title == "Committee Meeting" }.sorted { $0.startDate < $1.startDate }
+        XCTAssertEqual(committee.map { calendar.component(.day, from: $0.startDate) }, [8, 13, 10])
+        XCTAssertTrue(committee.allSatisfy { calendar.component(.weekday, from: $0.startDate) == 3 })
+        let fridays = events.filter { $0.title == "Last Friday" }.sorted { $0.startDate < $1.startDate }
+        XCTAssertEqual(fridays.map { calendar.component(.day, from: $0.startDate) }, [25, 30])
+    }
+
+    func testDottedEuropeanDatesParse() throws {
+        let csv = "Date,Amount\n01.09.2026,10.00\n"
+        let document = try GeneralSpreadsheetImporter.parse(data: Data(csv.utf8), sourceName: "eu.csv")
+        let preview = GeneralSpreadsheetImporter.preview(document: document, mapping: TransactionColumnMapping.detected(from: document.headers), accountID: UUID(), defaultDirection: .income, defaultCategory: "Dues", reconciliations: [])
+        let date = try XCTUnwrap(preview.validRows.first?.draft?.date)
+        XCTAssertEqual(Calendar.current.dateComponents([.year, .month, .day], from: date), DateComponents(year: 2026, month: 9, day: 1))
+    }
+
+    @MainActor
+    func testReimbursementValidationRejectsFuturePurchaseDates() {
+        XCTAssertThrowsError(try ReimbursementService.validate(requesterPersonID: UUID(), purpose: "Supplies", category: "Supplies", amountCents: 100, purchaseDate: Date().addingTimeInterval(3 * 86_400))) { error in
+            XCTAssertEqual(error as? ReimbursementError, .purchaseDateInFuture)
+        }
+        XCTAssertNoThrow(try ReimbursementService.validate(requesterPersonID: UUID(), purpose: "Supplies", category: "Supplies", amountCents: 100, purchaseDate: Date()))
+    }
+
+    func testDefaultOperatingAccountPrefersCheckingOverAlphabeticalOrder() {
+        let cashBox = AccountRecord(name: "Cash Box", kind: .cash)
+        let undeposited = AccountRecord(name: "Undeposited Funds", kind: .undepositedFunds)
+        let checking = AccountRecord(name: "Troop 51 Checking", kind: .checking)
+        let archived = AccountRecord(name: "Old Checking", kind: .checking)
+        archived.isActive = false
+        XCTAssertEqual(AccountSelectionPolicy.defaultOperatingAccount(in: [cashBox, undeposited, archived, checking])?.id, checking.id)
+        XCTAssertEqual(AccountSelectionPolicy.defaultOperatingAccount(in: [cashBox, undeposited])?.id, cashBox.id)
+        XCTAssertNil(AccountSelectionPolicy.defaultOperatingAccount(in: [undeposited]))
+    }
+
+    @MainActor
+    func testScoutbookPaymentImportSkipsAmbiguousNamesInsteadOfCreatingDuplicates() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        context.insert(PersonRecord(firstName: "Sam", lastName: "Smith", role: .parent))
+        context.insert(PersonRecord(firstName: "Sam", lastName: "Smith", role: .leader))
+        try context.save()
+        let document = try ScoutbookImporter.parse(data: Data("Name,Date,Amount,Type\nSam Smith,8/30/2026,25.00,Payment\n".utf8), sourceName: "payment-log.csv")
+        let result = try ScoutbookImporter.importDocument(document, kind: .paymentLog, into: context)
+        XCTAssertEqual(result.inserted, 0)
+        XCTAssertEqual(result.skipped, 1)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PersonRecord>()).count, 2)
+        XCTAssertTrue(result.issues.first?.contains("more than one person") == true)
     }
 }

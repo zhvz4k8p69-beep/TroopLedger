@@ -102,7 +102,7 @@ struct GeneralSpreadsheetImportView: View {
             Text(errorMessage ?? statusMessage ?? "")
         }
         .onAppear {
-            if accountID == nil { accountID = accounts.first(where: \.isActive)?.id ?? accounts.first?.id }
+            if accountID == nil { accountID = AccountSelectionPolicy.defaultOperatingAccount(in: accounts)?.id ?? accounts.first?.id }
         }
     }
 
@@ -244,7 +244,7 @@ struct GeneralSpreadsheetImportView: View {
             document = parsed
             mapping = TransactionColumnMapping.detected(from: parsed.headers)
             skipExceptions = false
-            if accountID == nil { accountID = accounts.first(where: \.isActive)?.id ?? accounts.first?.id }
+            if accountID == nil { accountID = AccountSelectionPolicy.defaultOperatingAccount(in: accounts)?.id ?? accounts.first?.id }
         } catch {
             errorMessage = error.localizedDescription
         }

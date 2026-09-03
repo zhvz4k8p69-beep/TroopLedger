@@ -47,6 +47,8 @@ struct TransactionListView: View {
         return transactions.first { $0.id == selectedTransactionID }
     }
 
+    private var depositedReceiptIDs: Set<UUID> { Set(depositAllocations.compactMap(\.sourceCashReceiptID)) }
+
     private var reportableAccounts: [AccountRecord] {
         accounts.filter { $0.isActive || FinanceEngine.bookBalance(account: $0, transactions: transactions) != 0 }
     }
@@ -140,7 +142,7 @@ struct TransactionListView: View {
                                 .foregroundStyle(.secondary)
                         }
                         ForEach(filteredCashReceipts) { receipt in
-                            CashReceiptRow(receipt: receipt)
+                            CashReceiptRow(receipt: receipt, isDeposited: depositedReceiptIDs.contains(receipt.id))
                         }
                     }
                     .searchable(text: $searchText, prompt: "Person, purpose, or payment type")
@@ -151,7 +153,7 @@ struct TransactionListView: View {
                 List {
                     ForEach(filtered) { transaction in
                         let isLocked = PeriodLocking.isLocked(transaction, reconciliations: reconciliations)
-                        let isBatchProtected = transaction.isTransfer || depositAllocations.contains { $0.sourceTransactionID == transaction.id }
+                        let isBatchProtected = transactionIsProtected(transaction)
                         Button { transactionToEdit = transaction } label: {
                             TransactionRow(
                                 transaction: transaction,
@@ -379,7 +381,13 @@ struct TransactionListView: View {
                     inspectorField("Category", transaction.category)
                     if !transaction.checkNumber.isEmpty { inspectorField("Check number", transaction.checkNumber) }
                     if !transaction.memo.isEmpty { inspectorField("Memo", transaction.memo) }
-                    inspectorField("Audit status", transactionIsProtected(transaction) ? "Locked or batch-protected" : "Editable")
+                    inspectorField("Audit status", protectionDescription(transaction))
+                    NavigationLink {
+                        AuditHistoryView(recordID: transaction.id, title: transaction.payee.isEmpty ? transaction.category : transaction.payee)
+                    } label: {
+                        Label("History", systemImage: "clock.arrow.circlepath")
+                    }
+                    .padding(.top, 10)
 
                     HStack {
                         Button("Delete", systemImage: "trash", role: .destructive) { requestDeletion(transaction) }
@@ -425,7 +433,7 @@ struct TransactionListView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    ForEach(filteredCashReceipts) { receipt in CashReceiptRow(receipt: receipt) }
+                    ForEach(filteredCashReceipts) { receipt in CashReceiptRow(receipt: receipt, isDeposited: depositedReceiptIDs.contains(receipt.id)) }
                 }
             }
         }
@@ -448,6 +456,15 @@ struct TransactionListView: View {
             return
         }
         pendingDeletion = transaction
+    }
+
+    private func protectionDescription(_ transaction: LedgerTransaction) -> String {
+        if PeriodLocking.isLocked(transaction, reconciliations: reconciliations) { return "Locked by reconciliation" }
+        if transaction.isTransfer || depositAllocations.contains(where: { $0.sourceTransactionID == transaction.id }) { return "Part of a deposit batch or transfer" }
+        if reimbursements.contains(where: { $0.linkedTransactionID == transaction.id }) { return "Pays a reimbursement request" }
+        if memberEntries.contains(where: { $0.accountTransactionID == transaction.id }) { return "Bank receipt for a member payment" }
+        if transactions.contains(where: { $0.adjustsTransactionID == transaction.id }) { return "Corrected by an adjustment" }
+        return "Editable"
     }
 
     private func transactionIsProtected(_ transaction: LedgerTransaction) -> Bool {
@@ -511,14 +528,22 @@ private enum TransactionPresentation: String, CaseIterable, Identifiable {
 
 private struct CashReceiptRow: View {
     let receipt: CashReceiptRecord
+    var isDeposited = false
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "banknote")
-                .foregroundStyle(.secondary)
+            Image(systemName: isDeposited ? "checkmark.circle.fill" : "banknote")
+                .foregroundStyle(isDeposited ? Color.green : Color.secondary)
             VStack(alignment: .leading, spacing: 3) {
-                Text(receipt.personName.isEmpty ? receipt.purpose : receipt.personName)
-                    .font(.headline)
+                HStack(spacing: 6) {
+                    Text(receipt.personName.isEmpty ? receipt.purpose : receipt.personName)
+                        .font(.headline)
+                    Text(isDeposited ? "Deposited" : "Awaiting deposit")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background((isDeposited ? Color.green : Color.orange).opacity(0.16), in: Capsule())
+                }
                 Text([receipt.date.formatted(date: .abbreviated, time: .omitted), receipt.purpose, receipt.paymentKind]
                     .filter { !$0.isEmpty }
                     .joined(separator: " • "))

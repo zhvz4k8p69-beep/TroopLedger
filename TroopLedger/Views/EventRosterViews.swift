@@ -45,9 +45,12 @@ struct EventRosterView: View {
                         Label(event.mapSearchQuery, systemImage: "mappin.and.ellipse")
                     }
                     HStack(spacing: 14) {
-                        Label("\(participants.count) total", systemImage: "person.2")
-                        Text("\(scouts.count) Scouts")
-                        Text("\(adults.count) adults")
+                        Label("\(participants.filter { $0.status != .cancelled }.count) attending", systemImage: "person.2")
+                        Text("\(scouts.filter { $0.status != .cancelled }.count) Scouts")
+                        Text("\(adults.filter { $0.status != .cancelled }.count) adults")
+                        if participants.contains(where: { $0.status == .cancelled }) {
+                            Text("\(participants.filter { $0.status == .cancelled }.count) cancelled")
+                        }
                     }
                     .font(.subheadline)
                     .foregroundStyle(.secondary)

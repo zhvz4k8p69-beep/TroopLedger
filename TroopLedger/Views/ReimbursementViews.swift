@@ -15,15 +15,24 @@ struct ReimbursementListView: View {
     @Query(sort: \PersonRecord.lastName) private var people: [PersonRecord]
     @State private var filter = ReimbursementFilter.open
     @State private var showingNewRequest = false
+    @State private var searchText = ""
 
     private var filteredRequests: [ReimbursementRequest] {
-        switch filter {
+        let byStatus: [ReimbursementRequest] = switch filter {
         case .open: requests.filter { $0.status == .submitted || $0.status == .approved }
         case .all: requests
         case .submitted: requests.filter { $0.status == .submitted }
         case .approved: requests.filter { $0.status == .approved }
         case .paid: requests.filter { $0.status == .paid }
         case .declined: requests.filter { $0.status == .declined }
+        }
+        guard !searchText.isEmpty else { return byStatus }
+        return byStatus.filter {
+            $0.purpose.localizedCaseInsensitiveContains(searchText)
+                || $0.category.localizedCaseInsensitiveContains(searchText)
+                || $0.paymentReference.localizedCaseInsensitiveContains(searchText)
+                || requesterName(for: $0).localizedCaseInsensitiveContains(searchText)
+                || Money.editableString(cents: $0.amountCents).contains(searchText)
         }
     }
 
@@ -55,6 +64,7 @@ struct ReimbursementListView: View {
                 .listStyle(.inset)
             }
         }
+        .searchable(text: $searchText, prompt: "Purpose, requester, category, reference, or amount")
         .pageHeader(title: "Reimbursements")
         .toolbar {
             Button("New Reimbursement", systemImage: "plus") { showingNewRequest = true }
@@ -159,7 +169,7 @@ struct ReimbursementEditorView: View {
                         Text("Choose a person").tag(nil as UUID?)
                         ForEach(people.filter { $0.isActive || $0.id == request?.requesterPersonID }) { Text($0.displayName).tag($0.id as UUID?) }
                     }
-                    DatePicker("Purchase date", selection: $purchaseDate, displayedComponents: .date)
+                    DatePicker("Purchase date", selection: $purchaseDate, in: ...Date(), displayedComponents: .date)
                     TextField("Business purpose", text: $purpose, axis: .vertical)
                     AmountField(title: "Amount", text: $amount)
                     Picker("Saved category", selection: categorySelection) {
@@ -215,7 +225,8 @@ struct ReimbursementEditorView: View {
                 requesterPersonID: requesterPersonID,
                 purpose: purpose,
                 category: category,
-                amountCents: cents
+                amountCents: cents,
+                purchaseDate: purchaseDate
             )
             guard let cents else { throw ReimbursementError.invalidAmount }
             let isNew = request == nil
@@ -401,6 +412,14 @@ struct ReimbursementDetailView: View {
                     Text("Returns the request to the review queue when a decision was made by mistake. The original decision stays in the audit log.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("History") {
+                NavigationLink {
+                    AuditHistoryView(recordID: request.id, title: request.purpose)
+                } label: {
+                    Label("Audit entries for this request", systemImage: "clock.arrow.circlepath")
                 }
             }
 
@@ -681,7 +700,7 @@ private struct ReimbursementPaymentView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) { Button("Record Paid", action: recordPayment) }
             }
-            .onAppear { accountID = accountID ?? accounts.first(where: \.isActive)?.id }
+            .onAppear { accountID = accountID ?? AccountSelectionPolicy.defaultOperatingAccount(in: accounts)?.id }
         }
         .frame(minWidth: 480, minHeight: 440)
         .alert("Payment", isPresented: Binding(

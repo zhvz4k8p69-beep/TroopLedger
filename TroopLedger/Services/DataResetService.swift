@@ -229,6 +229,21 @@ enum DataIntegrityService {
         for event in events where event.closedAt != nil && !closeouts.contains(where: { $0.eventID == event.id }) {
             issues.append(.init(severity: .problem, area: "Events", message: "\(event.name) is marked closed but has no close-out record."))
         }
+        // Cash traceability: member payments that no bank receipt backs, and rosters that record more money
+        // collected than the register shows for the event.
+        let unlinkedPayments = entries.filter { $0.kind == .payment && $0.accountTransactionID == nil }
+        if !unlinkedPayments.isEmpty {
+            let total = unlinkedPayments.reduce(Int64(0)) { $0 + $1.amountCents }
+            issues.append(.init(severity: .warning, area: "Cash traceability", message: "\(unlinkedPayments.count) member payment\(unlinkedPayments.count == 1 ? "" : "s") totaling \(Money.currency(cents: total)) \(unlinkedPayments.count == 1 ? "is" : "are") not linked to a bank receipt."))
+        }
+        for event in events {
+            let rosterPaid = participants.filter { $0.eventID == event.id }.reduce(Int64(0)) { $0 + $1.paidCents }
+            guard rosterPaid > 0 else { continue }
+            let linkedIncome = transactions.filter { $0.eventID == event.id && $0.direction == .income && !$0.isTransfer }.reduce(Int64(0)) { $0 + $1.amountCents }
+            if rosterPaid > linkedIncome {
+                issues.append(.init(severity: .warning, area: "Cash traceability", message: "\(event.name): roster payments total \(Money.currency(cents: rosterPaid)) but only \(Money.currency(cents: linkedIncome)) of income is linked to the event."))
+            }
+        }
         let duplicateIDs = Dictionary(grouping: people.filter { !$0.scoutingMemberID.trimmingCharacters(in: .whitespaces).isEmpty }, by: { $0.scoutingMemberID.trimmingCharacters(in: .whitespaces) })
             .filter { $0.value.count > 1 }
         for (memberID, matches) in duplicateIDs {

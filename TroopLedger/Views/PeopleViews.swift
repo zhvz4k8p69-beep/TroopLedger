@@ -338,6 +338,14 @@ struct PersonDetailView: View {
                 }
                 Button("Add Charge or Payment", systemImage: "plus.circle") { showingEntry = true }
             }
+
+            Section("History") {
+                NavigationLink {
+                    AuditHistoryView(recordID: person.id, title: person.displayName)
+                } label: {
+                    Label("Audit entries for this person", systemImage: "clock.arrow.circlepath")
+                }
+            }
         }
         .pageToolbar(title: person.displayName) {
             Button("Edit Person", systemImage: "pencil") { showingEdit = true }

@@ -216,7 +216,7 @@ private struct BatchDepositBuilderView: View {
                         .disabled(selectedTotal <= 0 || destinationAccountID == nil)
                 }
             }
-            .onAppear { destinationAccountID = destinationAccountID ?? destinations.first?.id }
+            .onAppear { destinationAccountID = destinationAccountID ?? AccountSelectionPolicy.defaultOperatingAccount(in: destinations)?.id ?? destinations.first?.id }
         }
         .frame(minWidth: 560, minHeight: 700)
         .alert("Deposit Batch", isPresented: Binding(

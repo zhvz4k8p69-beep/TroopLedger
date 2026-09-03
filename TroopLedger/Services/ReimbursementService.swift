@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import ImageIO
 import SwiftData
 import UniformTypeIdentifiers
 
@@ -168,6 +169,7 @@ enum ReimbursementError: LocalizedError, Equatable {
     case requestNotReopenable
     case reopenReasonRequired
     case receiptJustificationRequired
+    case purchaseDateInFuture
 
     var errorDescription: String? {
         switch self {
@@ -196,6 +198,7 @@ enum ReimbursementError: LocalizedError, Equatable {
         case .requestNotReopenable: "Only an approved-but-unpaid or declined request can be returned for review."
         case .reopenReasonRequired: "Explain why this decision is being reopened."
         case .receiptJustificationRequired: "No receipt is attached. Approve only after recording in the review notes why the request is acceptable without one."
+        case .purchaseDateInFuture: "The purchase date cannot be in the future."
         }
     }
 }
@@ -204,11 +207,14 @@ enum ReimbursementError: LocalizedError, Equatable {
 enum ReimbursementService {
     static let maximumAttachmentBytes = 15 * 1_024 * 1_024
 
-    static func validate(requesterPersonID: UUID?, purpose: String, category: String, amountCents: Int64?) throws {
+    static func validate(requesterPersonID: UUID?, purpose: String, category: String, amountCents: Int64?, purchaseDate: Date? = nil, now: Date = Date(), calendar: Calendar = .current) throws {
         guard requesterPersonID != nil else { throw ReimbursementError.requesterRequired }
         guard !purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ReimbursementError.purposeRequired }
         guard !category.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ReimbursementError.categoryRequired }
         guard let amountCents, amountCents > 0 else { throw ReimbursementError.invalidAmount }
+        if let purchaseDate, calendar.startOfDay(for: purchaseDate) > calendar.startOfDay(for: now) {
+            throw ReimbursementError.purchaseDateInFuture
+        }
     }
 
     @discardableResult
@@ -227,16 +233,35 @@ enum ReimbursementService {
         }
         // The declared type comes from a filename extension or picker metadata; the bytes decide what is stored.
         // This rejects renamed files and scriptable formats such as SVG that merely claim to be an image.
-        guard let mediaType = sniffedMediaType(data),
-              (declaredMediaType == "application/pdf") == (mediaType == "application/pdf") else {
+        guard let sniffedType = sniffedMediaType(data),
+              (declaredMediaType == "application/pdf") == (sniffedType == "application/pdf") else {
             throw ReimbursementError.receiptTypeUnsupported
         }
+        // Photos carry EXIF metadata, including the GPS position where the receipt was photographed. Receipts
+        // are exported to committee and audit packages, so store only the pixels.
+        let stored: (data: Data, mediaType: String)
+        if sniffedType == "application/pdf" {
+            stored = (data, sniffedType)
+        } else {
+            guard let reencoded = imageWithoutMetadata(data, preferPNG: sniffedType == "image/png" || sniffedType == "image/gif") else {
+                throw ReimbursementError.receiptTypeUnsupported
+            }
+            stored = reencoded
+        }
+        let data = stored.data
+        let mediaType = stored.mediaType
         let fingerprint = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         let existing = try modelContext.fetch(FetchDescriptor<ReimbursementAttachment>())
         guard !existing.contains(where: { $0.requestID == request.id && $0.sha256 == fingerprint }) else {
             throw ReimbursementError.duplicateReceipt
         }
-        let cleanName = sanitizedFilename(filename, fallbackExtension: mediaType == "application/pdf" ? "pdf" : "jpg")
+        var cleanName = sanitizedFilename(filename, fallbackExtension: mediaType == "application/pdf" ? "pdf" : "jpg")
+        if mediaType != "application/pdf" {
+            let expectedExtension = mediaType == "image/png" ? "png" : "jpg"
+            if (cleanName as NSString).pathExtension.lowercased() != expectedExtension {
+                cleanName = ((cleanName as NSString).deletingPathExtension) + "." + expectedExtension
+            }
+        }
         let attachment = ReimbursementAttachment(
             requestID: request.id,
             filename: cleanName,
@@ -539,6 +564,21 @@ enum ReimbursementService {
             in: modelContext
         )
         try modelContext.save()
+    }
+
+    /// Decodes the image and writes it back without any metadata dictionary (EXIF, GPS, maker notes).
+    static func imageWithoutMetadata(_ data: Data, preferPNG: Bool) -> (data: Data, mediaType: String)? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+            return nil
+        }
+        let type: UTType = preferPNG ? .png : .jpeg
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output as CFMutableData, type.identifier as CFString, 1, nil) else { return nil }
+        let properties: [CFString: Any] = preferPNG ? [:] : [kCGImageDestinationLossyCompressionQuality: 0.92]
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return (output as Data, preferPNG ? "image/png" : "image/jpeg")
     }
 
     /// Identifies a receipt by its leading bytes. Only raster image formats and PDF are accepted.

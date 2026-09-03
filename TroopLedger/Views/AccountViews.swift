@@ -37,6 +37,13 @@ struct AccountListView: View {
                                                 .font(.caption2)
                                                 .foregroundStyle(.orange)
                                         }
+                                        if !account.isActive {
+                                            Text("Inactive")
+                                                .font(.caption2.weight(.semibold))
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(Color.secondary.opacity(0.16), in: Capsule())
+                                        }
                                     }
                                     Text([account.kind.rawValue, account.institution].filter { !$0.isEmpty }.joined(separator: " • "))
                                         .font(.caption)

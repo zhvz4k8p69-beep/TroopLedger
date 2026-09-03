@@ -375,10 +375,29 @@ enum LinkedTransactionPolicy {
 /// Decides when the optional device lock engages. Kept free of UI so the rule can be tested.
 enum AppLockPolicy {
     static let storageKey = "security.requiresDeviceAuthentication"
+    /// A Mac left unattended never moves the app to the background; lock after this long without focus.
+    static let inactivityTimeout: TimeInterval = 5 * 60
 
     static func shouldLock(isEnabled: Bool, movedToBackground: Bool, alreadyLocked: Bool) -> Bool {
         guard isEnabled else { return false }
         return alreadyLocked || movedToBackground
+    }
+
+    static func shouldLockAfterInactivity(isEnabled: Bool, inactiveSince: Date?, now: Date = Date()) -> Bool {
+        guard isEnabled, let inactiveSince else { return false }
+        return now.timeIntervalSince(inactiveSince) >= inactivityTimeout
+    }
+}
+
+/// Picks the account a money screen should start on. Alphabetical order put "Cash Box" ahead of
+/// "Troop 51 Checking", so bank imports, deposits, and reimbursement payments defaulted to the cash box.
+enum AccountSelectionPolicy {
+    static func defaultOperatingAccount(in accounts: [AccountRecord]) -> AccountRecord? {
+        let active = accounts.filter(\.isActive)
+        return active.first { $0.kind == .checking }
+            ?? active.first { $0.kind == .savings }
+            ?? active.first { $0.kind == .other }
+            ?? active.first { $0.kind == .cash }
     }
 }
 
