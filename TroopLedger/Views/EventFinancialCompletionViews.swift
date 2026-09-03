@@ -180,6 +180,10 @@ private struct EventFeeScheduleFormView: View {
         }
     }
 
+    private func scheduleSnapshot(_ record: EventFeeScheduleRecord) -> [(String, String)] {
+        [("Name", record.name), ("Fee", Money.currency(cents: record.feeCents)), ("Eligibility", record.eligibilityNotes), ("Default", String(record.isDefault))]
+    }
+
     private var canSave: Bool {
         guard let cents = Money.cents(from: amount) else { return false }
         return (try? EventFeeSchedulePolicy.validate(
@@ -196,6 +200,7 @@ private struct EventFeeScheduleFormView: View {
             guard let cents = Money.cents(from: amount) else { throw EventFeeScheduleValidationError.negativeFee }
             try EventFeeSchedulePolicy.validate(event: event, schedule: schedule, name: name, feeCents: cents, schedules: allSchedules)
             let record = schedule ?? EventFeeScheduleRecord(eventID: event.id, name: name, feeCents: cents)
+            let before = schedule.map(scheduleSnapshot)
             record.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
             record.eligibilityNotes = eligibility.trimmingCharacters(in: .whitespacesAndNewlines)
             record.feeCents = cents
@@ -206,7 +211,7 @@ private struct EventFeeScheduleFormView: View {
             }
             let isNew = schedule == nil
             if isNew { modelContext.insert(record) }
-            AuditLogger.record(isNew ? .create : .edit, recordType: "Event Fee Schedule", recordID: record.id, summary: "\(isNew ? "Created" : "Edited") \(record.name) fee schedule for \(event.name)", details: AuditLogger.details([("Fee", Money.currency(cents: record.feeCents)), ("Default", String(record.isDefault))]), in: modelContext)
+            AuditLogger.record(isNew ? .create : .edit, recordType: "Event Fee Schedule", recordID: record.id, summary: "\(isNew ? "Created" : "Edited") \(record.name) fee schedule for \(event.name)", details: AuditLogger.details([("Fee", Money.currency(cents: record.feeCents)), ("Default", String(record.isDefault))] + (before.map { AuditLogger.changes(from: $0, to: scheduleSnapshot(record)) } ?? [])), in: modelContext)
             try modelContext.save()
             dismiss()
         } catch {

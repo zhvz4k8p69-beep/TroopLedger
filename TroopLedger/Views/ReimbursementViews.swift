@@ -598,7 +598,7 @@ private struct ReimbursementPaymentView: View {
                             Text("Choose an account").tag(nil as UUID?)
                             ForEach(accounts.filter(\.isActive)) { Text($0.name).tag($0.id as UUID?) }
                         }
-                        DatePicker("Payment date", selection: $paymentDate, displayedComponents: .date)
+                        DatePicker("Payment date", selection: $paymentDate, in: ...Date(), displayedComponents: .date)
                         TextField("Check / payment reference", text: $reference)
                         LabeledContent("Payee", value: requesterName)
                         LabeledContent("Amount", value: Money.currency(cents: request.amountCents))

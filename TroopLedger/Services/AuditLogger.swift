@@ -15,10 +15,18 @@ struct AuditIdentity: Equatable {
 #endif
         return AuditIdentity(
             deviceName: cachedDeviceName,
-            operatingSystem: process.operatingSystemVersionString,
+            operatingSystem: "\(process.operatingSystemVersionString) • TroopLedger \(applicationVersion)",
             userIdentity: localUser
         )
     }
+
+    /// Which build wrote an entry matters when reconstructing what a bug or an old version did to the books.
+    private static let applicationVersion: String = {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
+    }()
 
     /// `ProcessInfo.hostName` performs a synchronous reverse-DNS lookup that can stall the main thread for
     /// seconds on a slow or captive network, and it ran for every audit entry. The kernel hostname is read

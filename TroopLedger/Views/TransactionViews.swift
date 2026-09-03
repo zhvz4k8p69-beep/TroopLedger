@@ -18,6 +18,7 @@ struct TransactionListView: View {
     @State private var selectedTransactionID: UUID?
     @State private var deletionMessage: String?
     @State private var pendingDeletion: LedgerTransaction?
+    @State private var showingTransfer = false
 
     private var filtered: [LedgerTransaction] {
         guard !searchText.isEmpty else { return transactions }
@@ -60,18 +61,28 @@ struct TransactionListView: View {
         }
     }
 
+    /// Only bank-type accounts clear against statements; cash and Undeposited Funds entries never do.
+    private var bankAccountIDs: Set<UUID> {
+        Set(accounts.filter { $0.kind != .cash && $0.kind != .undepositedFunds }.map(\.id))
+    }
+    private var unclearedBankTransactions: [LedgerTransaction] {
+        transactions.filter { !$0.isCleared && $0.accountID.map(bankAccountIDs.contains) == true }
+    }
     private var unclearedTotal: Int64 {
-        transactions.filter { !$0.isCleared }.reduce(0) { $0 + $1.signedAmountCents }
+        unclearedBankTransactions.reduce(0) { $0 + $1.signedAmountCents }
     }
 
     var body: some View {
         content
         .pageToolbar(title: "Transactions") {
+            Button("Transfer", systemImage: "arrow.left.arrow.right") { showingTransfer = true }
+                .disabled(accounts.filter(\.isActive).count < 2 || presentation != .bankRegister)
             Button("Add Transaction", systemImage: "plus") { showingNewTransaction = true }
                 .buttonStyle(.fieldbookProminent)
                 .disabled(accounts.isEmpty || presentation != .bankRegister)
         }
         .sheet(isPresented: $showingNewTransaction) { TransactionFormView() }
+        .sheet(isPresented: $showingTransfer) { AccountTransferFormView() }
         .sheet(item: $transactionToEdit) { TransactionFormView(transaction: $0) }
         .confirmationDialog(
             "Delete this transaction?",
@@ -229,7 +240,7 @@ struct TransactionListView: View {
             Divider().frame(height: 34).padding(.horizontal, 14)
             VStack(alignment: .leading, spacing: 3) {
                 Text("Uncleared").font(.caption).foregroundStyle(.secondary)
-                Text("\(transactions.filter { !$0.isCleared }.count)").font(.headline).monospacedDigit()
+                Text("\(unclearedBankTransactions.count)").font(.headline).monospacedDigit()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Divider().frame(height: 34).padding(.horizontal, 14)
@@ -534,7 +545,7 @@ private struct TransactionRow: View {
                 HStack {
                     Text(transaction.payee.isEmpty ? transaction.category : transaction.payee).font(.headline)
                     if transaction.isTransfer {
-                        Text("Batch Transfer")
+                        Text(transaction.depositBatchID == nil ? "Transfer" : "Batch Transfer")
                             .font(.caption2.weight(.semibold))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -607,7 +618,9 @@ private struct BatchProtectedTransactionView: View {
                 Section {
                     Label(
                         transaction.isTransfer
-                            ? "This matched account-transfer entry is controlled by its deposit batch."
+                            ? (transaction.depositBatchID == nil
+                                ? "This is one side of a matched transfer between troop accounts. Transfers are excluded from income and expense reports."
+                                : "This matched account-transfer entry is controlled by its deposit batch.")
                             : "This receipt is an immutable allocation in a posted deposit batch.",
                         systemImage: "lock.fill"
                     )
@@ -616,7 +629,7 @@ private struct BatchProtectedTransactionView: View {
                 }
             }
             .formStyle(.grouped)
-            .navigationTitle("Deposit Transaction")
+            .navigationTitle(transaction.depositBatchID == nil && transaction.isTransfer ? "Account Transfer" : "Deposit Transaction")
             .toolbar { Button("Done") { dismiss() } }
         }
         .frame(minWidth: 460, minHeight: 420)
@@ -984,5 +997,84 @@ private struct LockedTransactionView: View {
 private extension TransactionDirection {
     var opposite: TransactionDirection {
         self == .income ? .expense : .income
+    }
+}
+
+/// Records a move between two troop accounts as a matched transfer pair instead of an expense and an income.
+struct AccountTransferFormView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \AccountRecord.name) private var accounts: [AccountRecord]
+    @Query(sort: \ReconciliationRecord.statementDate, order: .reverse) private var reconciliations: [ReconciliationRecord]
+    @State private var fromAccountID: UUID?
+    @State private var toAccountID: UUID?
+    @State private var date = Date()
+    @State private var amount = ""
+    @State private var reference = ""
+    @State private var memo = ""
+    @State private var errorMessage: String?
+
+    private var activeAccounts: [AccountRecord] { accounts.filter(\.isActive) }
+    private var canSave: Bool {
+        fromAccountID != nil && toAccountID != nil && fromAccountID != toAccountID && (Money.cents(from: amount) ?? 0) > 0
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Transfer") {
+                    Picker("From", selection: $fromAccountID) {
+                        Text("Choose an account").tag(nil as UUID?)
+                        ForEach(activeAccounts) { Text($0.name).tag($0.id as UUID?) }
+                    }
+                    Picker("To", selection: $toAccountID) {
+                        Text("Choose an account").tag(nil as UUID?)
+                        ForEach(activeAccounts) { Text($0.name).tag($0.id as UUID?) }
+                    }
+                    DatePicker("Date", selection: $date, in: ...Date(), displayedComponents: .date)
+                    AmountField(title: "Amount", text: $amount)
+                    TextField("Confirmation or check number", text: $reference)
+                }
+                Section("Memo") { TextField("Purpose of the transfer", text: $memo, axis: .vertical) }
+                Section {
+                    Text("Both sides are recorded as matched transfer entries. They change account balances but are excluded from income, expense, and budget reports.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("Transfer Between Accounts")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Post Transfer", action: save).disabled(!canSave) }
+            }
+            .onAppear {
+                if fromAccountID == nil { fromAccountID = activeAccounts.first(where: { $0.kind == .checking })?.id ?? activeAccounts.first?.id }
+                if toAccountID == nil { toAccountID = activeAccounts.first(where: { $0.id != fromAccountID })?.id }
+            }
+        }
+        .frame(minWidth: 460, minHeight: 480)
+        .alert("Transfer", isPresented: Binding(
+            get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
+        )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
+    }
+
+    private func save() {
+        do {
+            guard let cents = Money.cents(from: amount) else { throw AccountTransferError.invalidAmount }
+            _ = try AccountTransferService.post(
+                fromAccountID: fromAccountID,
+                toAccountID: toAccountID,
+                date: date,
+                amountCents: cents,
+                reference: reference,
+                memo: memo,
+                reconciliations: reconciliations,
+                in: modelContext
+            )
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }

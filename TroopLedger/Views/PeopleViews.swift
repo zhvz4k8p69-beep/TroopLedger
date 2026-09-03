@@ -72,7 +72,7 @@ struct PeopleListView: View {
             guard !searchText.isEmpty else { return true }
             return person.displayName.localizedCaseInsensitiveContains(searchText)
                 || person.patrol.localizedCaseInsensitiveContains(searchText)
-                || person.currentRank.displayName.localizedCaseInsensitiveContains(searchText)
+                || (person.currentRank != .none && person.currentRank.displayName.localizedCaseInsensitiveContains(searchText))
                 || person.positionSummary.localizedCaseInsensitiveContains(searchText)
         }
     }
@@ -280,6 +280,14 @@ struct PersonDetailView: View {
                                 Text("\(entry.kind.rawValue) • \(entry.date.formatted(date: .abbreviated, time: .omitted))\(eventName(entry.eventID).map { " • \($0)" } ?? "")")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                if entry.kind == .payment {
+                                    Label(
+                                        entry.accountTransactionID == nil ? "No bank receipt linked" : "Bank receipt linked",
+                                        systemImage: entry.accountTransactionID == nil ? "exclamationmark.circle" : "link"
+                                    )
+                                    .font(.caption2)
+                                    .foregroundStyle(entry.accountTransactionID == nil ? Color.orange : Color.secondary)
+                                }
                             }
                             Spacer()
                             MoneyText(cents: entry.balanceEffectCents, colorBySign: true)
@@ -537,6 +545,9 @@ struct MemberEntryFormView: View {
     @Environment(\.modelContext) private var modelContext
     let person: PersonRecord
     @Query(sort: \EventRecord.startDate, order: .reverse) private var events: [EventRecord]
+    @Query(sort: \LedgerTransaction.date, order: .reverse) private var transactions: [LedgerTransaction]
+    @Query private var allEntries: [MemberLedgerEntry]
+    @State private var linkedTransactionID: UUID?
     @State private var date = Date()
     @State private var kind = MemberEntryKind.charge
     @State private var amount = "0.00"
@@ -546,6 +557,14 @@ struct MemberEntryFormView: View {
     @State private var errorMessage: String?
 
     private var isAdjustment: Bool { kind == .adjustmentIncrease || kind == .adjustmentDecrease }
+
+    /// Income received from this person in the bank ledger that no other member-ledger payment claims yet.
+    private var receiptCandidates: [LedgerTransaction] {
+        let claimed = Set(allEntries.compactMap(\.accountTransactionID))
+        return transactions.filter {
+            $0.direction == .income && !$0.isTransfer && $0.personID == person.id && !claimed.contains($0.id)
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -559,6 +578,22 @@ struct MemberEntryFormView: View {
                     Picker("Event", selection: $eventID) {
                         Text("None").tag(nil as UUID?)
                         ForEach(events) { Text($0.name).tag($0.id as UUID?) }
+                    }
+                }
+                if kind == .payment {
+                    Section("Bank Receipt") {
+                        Picker("Received in", selection: $linkedTransactionID) {
+                            Text("Not linked").tag(nil as UUID?)
+                            ForEach(receiptCandidates) { transaction in
+                                Text("\(transaction.date.formatted(date: .abbreviated, time: .omitted)) • \(transaction.category) • \(Money.currency(cents: transaction.amountCents))")
+                                    .tag(transaction.id as UUID?)
+                            }
+                        }
+                        Text(receiptCandidates.isEmpty
+                            ? "No unlinked income from \(person.displayName) is recorded in the register yet. Record the deposit or Undeposited Funds receipt with this person linked, then attach it here so every payment traces to cash that actually arrived."
+                            : "Linking the register entry shows that the money behind this payment reached the troop's accounts.")
+                            .font(.footnote)
+                            .foregroundStyle(linkedTransactionID == nil ? .orange : .secondary)
                     }
                 }
                 Section(isAdjustment ? "Reason for Adjustment" : "Notes") {
@@ -595,6 +630,7 @@ struct MemberEntryFormView: View {
             let record = MemberLedgerEntry(personID: person.id, date: date, kind: kind, amountCents: cents, category: category.trimmingCharacters(in: .whitespacesAndNewlines))
             record.eventID = eventID
             record.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            record.accountTransactionID = kind == .payment ? linkedTransactionID : nil
             modelContext.insert(record)
             AuditLogger.record(
                 .create,
@@ -607,6 +643,7 @@ struct MemberEntryFormView: View {
                     ("Amount", Money.currency(cents: record.amountCents)),
                     ("Category", record.category),
                     ("Event ID", record.eventID?.uuidString),
+                    ("Linked bank transaction ID", record.accountTransactionID?.uuidString),
                     (isAdjustment ? "Adjustment reason" : "Notes", record.notes),
                 ]),
                 in: modelContext

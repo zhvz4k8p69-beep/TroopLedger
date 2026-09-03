@@ -52,7 +52,10 @@ final class FinanceEngineTests: XCTestCase {
 
         XCTAssertEqual(result.deletedRecordCount, ModelContainerFactory.modelTypes.count)
         let backup = try PlaintextBackupService.makeArchive(from: context, applicationVersion: "1.0.0-test")
-        XCTAssertTrue(backup.recordCounts.values.allSatisfy { $0 == 0 })
+        XCTAssertTrue(backup.recordCounts.filter { $0.key != "audit_log" }.values.allSatisfy { $0 == 0 })
+        // The reset itself is the first entry in the fresh audit log.
+        XCTAssertEqual(backup.recordCounts["audit_log"], 1)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<AuditLogEntry>()).first?.summary, "Deleted all records and started over")
     }
 
     func testBookBalanceUsesOpeningBalanceAndSignedTransactions() throws {
@@ -2813,5 +2816,154 @@ final class FinanceEngineTests: XCTestCase {
         let report = TreasurerReportService.makeSnapshot(title: "Test", periodStart: day, periodEnd: day, profile: nil, accounts: [account], transactions: [first, second, blank], people: [], memberEntries: [], reconciliations: [])
         XCTAssertEqual(report.income.map(\.category).sorted(), ["Dues", "Uncategorized"])
         XCTAssertEqual(report.income.first { $0.category == "Dues" }?.amountCents, 300)
+    }
+
+    // MARK: - Regression tests for the fourth audit round
+
+    func testBankImportFlagsRowsThatMatchExistingRegisterEntries() throws {
+        let account = AccountRecord(name: "Checking")
+        let day = Date(timeIntervalSince1970: 1_756_800_000)
+        let existing = LedgerTransaction(accountID: account.id, date: day, direction: .expense, amountCents: 4_250, payee: "Camp Store", category: "Supplies")
+        existing.checkNumber = "1042"
+        let dayText = day.formatted(.dateTime.month(.defaultDigits).day().year())
+        let csv = "Date,Amount,Payee,Reference\n\(dayText),-42.50,CAMP STORE,\n\(dayText),-42.50,Someone Else,1042\n\(dayText),-42.50,Other Vendor,\n"
+        let document = try GeneralSpreadsheetImporter.parse(data: Data(csv.utf8), sourceName: "bank.csv")
+        let preview = GeneralSpreadsheetImporter.preview(
+            document: document,
+            mapping: TransactionColumnMapping.detected(from: document.headers),
+            accountID: account.id,
+            defaultDirection: .expense,
+            defaultCategory: "Supplies",
+            reconciliations: [],
+            existingTransactions: [existing]
+        )
+        XCTAssertEqual(preview.invalidRows.count, 2)
+        XCTAssertTrue(preview.invalidRows.allSatisfy { row in row.issues.contains { $0.contains("likely a duplicate") } })
+        XCTAssertEqual(preview.validRows.count, 1)
+    }
+
+    func testBankImportUnderstandsPostedStatusTimestampsAndTrailingMinus() throws {
+        let csv = "Date,Amount,Status\n9/1/2026 14:05:00,12.50-,Posted\n2026-09-02 09:30,25.00,Pending\n9/2/2026,10.00 DR,Settled\n"
+        let document = try GeneralSpreadsheetImporter.parse(data: Data(csv.utf8), sourceName: "bank.csv")
+        let preview = GeneralSpreadsheetImporter.preview(
+            document: document,
+            mapping: TransactionColumnMapping.detected(from: document.headers),
+            accountID: UUID(),
+            defaultDirection: .income,
+            defaultCategory: "Dues",
+            reconciliations: []
+        )
+        let drafts = preview.validRows.compactMap(\.draft)
+        XCTAssertEqual(drafts.count, 3, preview.invalidRows.flatMap(\.issues).joined(separator: "; "))
+        XCTAssertEqual(drafts[0].direction, .expense)
+        XCTAssertEqual(drafts[0].amountCents, 1_250)
+        XCTAssertTrue(drafts[0].isCleared)
+        XCTAssertFalse(drafts[1].isCleared)
+        XCTAssertEqual(drafts[2].direction, .expense)
+        XCTAssertTrue(drafts[2].isCleared)
+    }
+
+    @MainActor
+    func testBatchDepositDoesNotCreditAmbiguousNames() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let undeposited = AccountRecord(name: "Undeposited Funds", kind: .undepositedFunds)
+        let checking = AccountRecord(name: "Checking", kind: .checking)
+        let first = PersonRecord(firstName: "Sam", lastName: "Smith", role: .parent)
+        let second = PersonRecord(firstName: "Sam", lastName: "Smith", role: .parent)
+        let receipt = CashReceiptRecord(date: Date(), personName: "Sam Smith", purpose: "Dues", amountCents: 1_000, paymentKind: "Cash")
+        context.insert(undeposited)
+        context.insert(checking)
+        context.insert(first)
+        context.insert(second)
+        context.insert(receipt)
+        try context.save()
+        let batch = try BatchDepositService.post(destinationAccountID: checking.id, depositDate: Date(), reference: "", notes: "", sourceTransactionIDs: [], sourceCashReceiptIDs: [receipt.id], reconciliations: [], in: context)
+        let allocation = try XCTUnwrap(context.fetch(FetchDescriptor<DepositAllocationRecord>()).first { $0.batchID == batch.id })
+        XCTAssertNil(allocation.personID)
+        XCTAssertEqual(allocation.payerNameSnapshot, "Sam Smith")
+    }
+
+    @MainActor
+    func testScoutbookRosterReimportRecordsChangesAndKeepsRegistrationDate() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let first = try ScoutbookImporter.parse(data: Data("First Name,Last Name,Member ID,Registration Date,Status\nAva,Scout,1001,3/5/2024,Active\n".utf8), sourceName: "members.csv")
+        _ = try ScoutbookImporter.importDocument(first, kind: .members, into: context)
+        let registration = try XCTUnwrap(context.fetch(FetchDescriptor<RegistrationRecord>()).first)
+        let originalDate = registration.registeredOn
+
+        let second = try ScoutbookImporter.parse(data: Data("First Name,Last Name,Member ID,Status,Program Year\nAva,Scout,1001,Inactive,2024\n".utf8), sourceName: "members-later.csv")
+        let result = try ScoutbookImporter.importDocument(second, kind: .members, into: context)
+        XCTAssertEqual(result.updated, 1)
+        XCTAssertTrue(result.changes.contains { $0.contains("Ava Scout") && $0.contains("Active Yes → No") }, result.changes.joined(separator: "\n"))
+        XCTAssertEqual(registration.registeredOn, originalDate)
+        let audit = try context.fetch(FetchDescriptor<AuditLogEntry>()).first { $0.recordType == "Scoutbook Import" && $0.details.contains("Changes") }
+        XCTAssertNotNil(audit)
+    }
+
+    @MainActor
+    func testReimbursementPaymentRejectsFutureDates() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let account = AccountRecord(name: "Checking")
+        let request = ReimbursementRequest(requesterPersonID: UUID(), purchaseDate: Date(), purpose: "Supplies", category: "Program Supplies", amountCents: 1_000)
+        request.status = .approved
+        context.insert(account)
+        context.insert(request)
+        try context.save()
+        XCTAssertThrowsError(try ReimbursementService.createAndLinkPayment(for: request, accountID: account.id, paymentDate: Date().addingTimeInterval(3 * 86_400), reference: "", payee: "Pat", reconciliations: [], in: context)) { error in
+            XCTAssertEqual(error as? ReimbursementError, .paymentDateInFuture)
+        }
+        XCTAssertEqual(request.status, .approved)
+    }
+
+    func testAllDayRecurringEventsKeepEveryDayAcrossDaylightSavingChanges() throws {
+        let ics = """
+        BEGIN:VCALENDAR
+        BEGIN:VEVENT
+        UID:weekend-1
+        DTSTART;VALUE=DATE:20260301
+        DTEND;VALUE=DATE:20260303
+        RRULE:FREQ=WEEKLY;COUNT=3
+        SUMMARY:Weekend Campout
+        END:VEVENT
+        END:VCALENDAR
+        """
+        let events = try ScoutbookCalendarService.parse(data: Data(ics.utf8))
+        XCTAssertEqual(events.count, 3)
+        let calendar = Calendar.current
+        for event in events {
+            let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: event.startDate), to: calendar.startOfDay(for: event.endDate)).day
+            XCTAssertEqual(days, 1, "occurrence starting \(event.startDate) lost a day")
+        }
+    }
+
+    @MainActor
+    func testAccountTransferPostsMatchedPairExcludedFromReports() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let checking = AccountRecord(name: "Checking", kind: .checking, openingBalanceCents: 50_000)
+        let savings = AccountRecord(name: "Savings", kind: .savings)
+        context.insert(checking)
+        context.insert(savings)
+        try context.save()
+        let pair = try AccountTransferService.post(fromAccountID: checking.id, toAccountID: savings.id, date: Date(), amountCents: 20_000, reference: "TR-1", memo: "Reserve", reconciliations: [], in: context)
+        let transactions = try context.fetch(FetchDescriptor<LedgerTransaction>())
+        XCTAssertEqual(transactions.count, 2)
+        XCTAssertEqual(pair.outgoing.transferGroupID, pair.incoming.transferGroupID)
+        XCTAssertTrue(transactions.allSatisfy(\.isTransfer))
+        XCTAssertEqual(FinanceEngine.bookBalance(account: checking, transactions: transactions), 30_000)
+        XCTAssertEqual(FinanceEngine.bookBalance(account: savings, transactions: transactions), 20_000)
+        let report = FinanceEngine.annualReport(period: ReportingPeriod.containing(Date()), transactions: transactions)
+        XCTAssertEqual(report.totalIncomeCents, 0)
+        XCTAssertEqual(report.totalExpenseCents, 0)
+        XCTAssertThrowsError(try AccountTransferService.post(fromAccountID: checking.id, toAccountID: checking.id, date: Date(), amountCents: 100, reference: "", memo: "", reconciliations: [], in: context)) { error in
+            XCTAssertEqual(error as? AccountTransferError, .sameAccount)
+        }
+    }
+
+    func testAuditIdentityRecordsTheAppVersion() {
+        XCTAssertTrue(AuditIdentity.current.operatingSystem.contains("TroopLedger"))
     }
 }

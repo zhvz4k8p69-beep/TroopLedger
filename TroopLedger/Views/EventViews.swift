@@ -849,7 +849,7 @@ struct EventFormView: View {
         _endDate = State(initialValue: event?.endDate ?? Calendar.current.date(byAdding: .hour, value: 1, to: defaultStart) ?? defaultStart)
         _isAllDay = State(initialValue: event?.isAllDay ?? false)
         _hasDeadline = State(initialValue: event?.registrationDeadline != nil)
-        _registrationDeadline = State(initialValue: event?.registrationDeadline ?? Date())
+        _registrationDeadline = State(initialValue: event?.registrationDeadline ?? min(Date(), defaultStart))
         _location = State(initialValue: event?.location ?? "")
         _address = State(initialValue: event?.address ?? "")
         _locationDetails = State(initialValue: event?.locationDetails ?? "")
@@ -908,6 +908,12 @@ struct EventFormView: View {
             // with no explanation.
             .onChange(of: startDate) { _, newStart in
                 if endDate < newStart { endDate = newStart }
+                if registrationDeadline > newStart { registrationDeadline = newStart }
+            }
+            // Enabling the deadline for an event that already started defaulted it to "now", which is after
+            // the start and silently disabled Save.
+            .onChange(of: hasDeadline) { _, enabled in
+                if enabled, registrationDeadline > startDate { registrationDeadline = startDate }
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -1121,6 +1127,7 @@ struct EventParticipantFormView: View {
                 feeScheduleID: selectedFeeScheduleID,
                 schedules: allFeeSchedules
             )
+            let before = participantSnapshot(participant)
             participant.guestName = participant.personID == nil ? guestName.trimmingCharacters(in: .whitespacesAndNewlines) : ""
             participant.status = status
             participant.feeCents = feeCents
@@ -1141,7 +1148,7 @@ struct EventParticipantFormView: View {
                     ("Fee", Money.currency(cents: participant.feeCents)),
                     ("Paid", Money.currency(cents: participant.paidCents)),
                     ("Transportation", participant.transportation),
-                ]),
+                ] + AuditLogger.changes(from: before, to: participantSnapshot(participant))),
                 in: modelContext
             )
             try modelContext.save()
@@ -1149,5 +1156,18 @@ struct EventParticipantFormView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Fee and paid amounts are money; an edit entry must show what they were before.
+    private func participantSnapshot(_ participant: EventParticipant) -> [(String, String)] {
+        [
+            ("Guest name", participant.guestName),
+            ("Status", participant.status.rawValue),
+            ("Fee", Money.currency(cents: participant.feeCents)),
+            ("Paid", Money.currency(cents: participant.paidCents)),
+            ("Fee schedule", participant.feeScheduleNameSnapshot),
+            ("Transportation", participant.transportation),
+            ("Notes", participant.notes),
+        ]
     }
 }

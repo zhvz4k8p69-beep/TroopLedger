@@ -167,7 +167,10 @@ enum BatchDepositService {
 
         let people = try modelContext.fetch(FetchDescriptor<PersonRecord>())
         for receipt in selectedReceipts {
-            let person = people.first { normalized($0.displayName) == normalized(receipt.personName) }
+            // A receipt is credited to a person only when exactly one roster record carries that name;
+            // two families with the same name must not have money attributed to whichever sorts first.
+            let matches = people.filter { normalized($0.displayName) == normalized(receipt.personName) }
+            let person = matches.count == 1 ? matches.first : nil
             let receiptTransaction = LedgerTransaction(
                 accountID: undeposited.id,
                 date: receipt.date,
@@ -281,5 +284,97 @@ enum BatchDepositService {
     private static func normalized(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+}
+
+enum AccountTransferError: LocalizedError, Equatable {
+    case sourceRequired
+    case destinationRequired
+    case sameAccount
+    case inactiveAccount
+    case invalidAmount
+    case dateInFuture
+    case sourceLocked(Date)
+    case destinationLocked(Date)
+
+    var errorDescription: String? {
+        switch self {
+        case .sourceRequired: "Choose the account the money leaves."
+        case .destinationRequired: "Choose the account the money enters."
+        case .sameAccount: "Choose two different accounts."
+        case .inactiveAccount: "Both accounts must be active."
+        case .invalidAmount: "Enter a transfer amount greater than zero."
+        case .dateInFuture: "A transfer cannot be dated in the future."
+        case .sourceLocked(let date): "The source account is locked through \(date.formatted(date: .long, time: .omitted)). Choose a later date."
+        case .destinationLocked(let date): "The destination account is locked through \(date.formatted(date: .long, time: .omitted)). Choose a later date."
+        }
+    }
+}
+
+/// Moves money between two of the troop's own accounts (checking to savings, cash box to checking) as a
+/// matched pair of transfer entries. Recording such a move as an ordinary expense plus income inflated both
+/// sides of every income/expense report and budget variance.
+@MainActor
+enum AccountTransferService {
+    @discardableResult
+    static func post(
+        fromAccountID: UUID?,
+        toAccountID: UUID?,
+        date: Date,
+        amountCents: Int64,
+        reference: String,
+        memo: String,
+        reconciliations: [ReconciliationRecord],
+        calendar: Calendar = .current,
+        now: Date = Date(),
+        in modelContext: ModelContext
+    ) throws -> (outgoing: LedgerTransaction, incoming: LedgerTransaction) {
+        guard let fromAccountID else { throw AccountTransferError.sourceRequired }
+        guard let toAccountID else { throw AccountTransferError.destinationRequired }
+        guard fromAccountID != toAccountID else { throw AccountTransferError.sameAccount }
+        guard amountCents > 0, Money.isWithinLimit(amountCents) else { throw AccountTransferError.invalidAmount }
+        guard calendar.startOfDay(for: date) <= calendar.startOfDay(for: now) else { throw AccountTransferError.dateInFuture }
+        let accounts = try modelContext.fetch(FetchDescriptor<AccountRecord>())
+        guard let source = accounts.first(where: { $0.id == fromAccountID && $0.isActive }),
+              let destination = accounts.first(where: { $0.id == toAccountID && $0.isActive }) else {
+            throw AccountTransferError.inactiveAccount
+        }
+        if let lock = PeriodLocking.latestLockDate(for: source.id, reconciliations: reconciliations, calendar: calendar),
+           calendar.startOfDay(for: date) <= lock {
+            throw AccountTransferError.sourceLocked(lock)
+        }
+        if let lock = PeriodLocking.latestLockDate(for: destination.id, reconciliations: reconciliations, calendar: calendar),
+           calendar.startOfDay(for: date) <= lock {
+            throw AccountTransferError.destinationLocked(lock)
+        }
+
+        let groupID = UUID()
+        let trimmedReference = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMemo = memo.trimmingCharacters(in: .whitespacesAndNewlines)
+        let outgoing = LedgerTransaction(accountID: source.id, date: date, direction: .expense, amountCents: amountCents, payee: "Transfer to \(destination.name)", category: "Account Transfer")
+        let incoming = LedgerTransaction(accountID: destination.id, date: date, direction: .income, amountCents: amountCents, payee: "Transfer from \(source.name)", category: "Account Transfer")
+        for transaction in [outgoing, incoming] {
+            transaction.isTransfer = true
+            transaction.transferGroupID = groupID
+            transaction.checkNumber = trimmedReference
+            transaction.memo = trimmedMemo
+            modelContext.insert(transaction)
+        }
+        AuditLogger.record(
+            .create,
+            recordType: "Account Transfer",
+            recordID: groupID,
+            summary: "Transferred \(Money.currency(cents: amountCents)) from \(source.name) to \(destination.name)",
+            details: AuditLogger.details([
+                ("Date", date.formatted(date: .numeric, time: .omitted)),
+                ("Reference", trimmedReference),
+                ("Memo", trimmedMemo),
+                ("Outgoing transaction", outgoing.id.uuidString),
+                ("Incoming transaction", incoming.id.uuidString),
+            ]),
+            in: modelContext
+        )
+        try modelContext.save()
+        return (outgoing, incoming)
     }
 }

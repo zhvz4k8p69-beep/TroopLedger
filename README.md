@@ -62,7 +62,7 @@ The sandboxed Mac app has read/write access only to files the user explicitly se
 
 Backups contain private financial and contact information, including calendar-subscription URLs. Store and transfer them securely. Version 0.7 exports data for backup and handoff; restoring a backup into the live database is not yet an in-app workflow.
 
-To discard the current database and begin a new setup, open **Preferences → Controls** and use the separate **Start Over** section at the bottom. Export the offered plaintext backup first if the records may be needed later. **Delete All Records and Start Over** warns that the deletion also syncs through iCloud, requires an initial destructive confirmation, and then requires typing `DELETE` before it removes every persisted record, including the troop profile, financial records, people, events, attachments, import history, control settings, and audit log.
+To discard the current database and begin a new setup, open **Preferences → Controls** and use the separate **Start Over** section at the bottom. Export the offered plaintext backup first if the records may be needed later. **Delete All Records and Start Over** warns that the deletion also syncs through iCloud, requires an initial destructive confirmation, and then requires typing `DELETE` before it removes every persisted record, including the troop profile, financial records, people, events, attachments, import history, control settings, and audit log. The first entry written to the fresh audit log records the reset itself, with the device, time, and number of records removed.
 
 ## Monthly, committee, and annual reporting
 

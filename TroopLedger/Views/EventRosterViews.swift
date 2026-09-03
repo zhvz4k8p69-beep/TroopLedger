@@ -233,7 +233,7 @@ struct EventRosterBuilderView: View {
                 && (searchText.isEmpty
                     || person.displayName.localizedCaseInsensitiveContains(searchText)
                     || person.patrol.localizedCaseInsensitiveContains(searchText)
-                    || person.currentRank.displayName.localizedCaseInsensitiveContains(searchText)
+                    || (person.currentRank != .none && person.currentRank.displayName.localizedCaseInsensitiveContains(searchText))
                     || person.positionSummary.localizedCaseInsensitiveContains(searchText))
         }
     }

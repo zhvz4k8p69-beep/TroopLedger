@@ -162,6 +162,7 @@ enum ReimbursementError: LocalizedError, Equatable {
     case transferTransaction
     case transactionAlreadyLinked
     case paymentDateLocked(Date)
+    case paymentDateInFuture
 
     var errorDescription: String? {
         switch self {
@@ -184,6 +185,7 @@ enum ReimbursementError: LocalizedError, Equatable {
         case .transferTransaction: "Account-transfer entries cannot be used as reimbursement payments."
         case .transactionAlreadyLinked: "That ledger transaction is already linked to another reimbursement request."
         case .paymentDateLocked(let date): "The selected account is locked through \(date.formatted(date: .long, time: .omitted)). Choose a later payment date."
+        case .paymentDateInFuture: "A reimbursement payment cannot be dated in the future. Record it on the day the check or transfer is issued."
         }
     }
 }
@@ -325,6 +327,8 @@ enum ReimbursementService {
         at date: Date = Date(),
         in modelContext: ModelContext
     ) throws {
+        // Evidence can be re-recorded; the audit trail must keep the identities it replaced.
+        let before = controlSnapshot(request)
         apply(approver.normalized, to: request, role: .approver)
         apply(signerOne.normalized, to: request, role: .signerOne)
         apply(signerTwo.normalized, to: request, role: .signerTwo)
@@ -341,7 +345,7 @@ enum ReimbursementService {
                 ("Signer 1", request.signerOneNameSnapshot),
                 ("Signer 2", request.signerTwoNameSnapshot),
                 ("Notes", request.disbursementControlNotes),
-            ]),
+            ] + AuditLogger.changes(from: before, to: controlSnapshot(request))),
             at: date,
             in: modelContext
         )
@@ -371,10 +375,12 @@ enum ReimbursementService {
         payee: String,
         reconciliations: [ReconciliationRecord],
         calendar: Calendar = .current,
+        now: Date = Date(),
         in modelContext: ModelContext
     ) throws -> LedgerTransaction {
         guard request.status == .approved else { throw ReimbursementError.requestNotApproved }
         guard request.linkedTransactionID == nil else { throw ReimbursementError.transactionAlreadyLinked }
+        guard calendar.startOfDay(for: paymentDate) <= calendar.startOfDay(for: now) else { throw ReimbursementError.paymentDateInFuture }
         guard let accountID,
               try modelContext.fetch(FetchDescriptor<AccountRecord>()).contains(where: { $0.id == accountID && $0.isActive }) else {
             throw ReimbursementError.accountRequired
@@ -504,6 +510,18 @@ enum ReimbursementService {
         }
         let result = String(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
         return result.isEmpty ? "receipt.\(fallbackExtension)" : result
+    }
+
+    private static func controlSnapshot(_ request: ReimbursementRequest) -> [(String, String)] {
+        func describe(_ identity: DisbursementControlIdentity) -> String {
+            [identity.name, identity.household, identity.personID?.uuidString ?? ""].filter { !$0.isEmpty }.joined(separator: " / ")
+        }
+        return [
+            ("Approver", describe(request.controlIdentity(for: .approver))),
+            ("Signer 1", describe(request.controlIdentity(for: .signerOne))),
+            ("Signer 2", describe(request.controlIdentity(for: .signerTwo))),
+            ("Control notes", request.disbursementControlNotes),
+        ]
     }
 
     private static func apply(_ identity: DisbursementControlIdentity, to request: ReimbursementRequest, role: DisbursementControlRole) {

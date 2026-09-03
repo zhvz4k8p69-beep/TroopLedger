@@ -178,6 +178,34 @@ enum GeneralSpreadsheetImporter {
         )
     }
 
+    /// Fingerprints of transactions already in the destination account, so a re-exported bank file (whose
+    /// bytes differ from the first export) does not post every transaction a second time.
+    struct ExistingTransactionIndex {
+        private var keys: Set<String> = []
+
+        init(transactions: [LedgerTransaction], accountID: UUID?, calendar: Calendar = .current) {
+            for transaction in transactions where transaction.accountID == accountID && !transaction.isTransfer {
+                for key in Self.keys(day: calendar.startOfDay(for: transaction.date), direction: transaction.direction, amountCents: transaction.amountCents, payee: transaction.payee, reference: transaction.checkNumber) {
+                    keys.insert(key)
+                }
+            }
+        }
+
+        func matches(day: Date, direction: TransactionDirection, amountCents: Int64, payee: String, reference: String) -> Bool {
+            Self.keys(day: day, direction: direction, amountCents: amountCents, payee: payee, reference: reference).contains { keys.contains($0) }
+        }
+
+        private static func keys(day: Date, direction: TransactionDirection, amountCents: Int64, payee: String, reference: String) -> [String] {
+            let base = "\(Int(day.timeIntervalSince1970))|\(direction.rawValue)|\(amountCents)"
+            var result: [String] = []
+            let normalizedPayee = normalizeHeader(payee)
+            if !normalizedPayee.isEmpty { result.append("\(base)|payee:\(normalizedPayee)") }
+            let normalizedReference = normalizeHeader(reference)
+            if !normalizedReference.isEmpty { result.append("\(base)|ref:\(normalizedReference)") }
+            return result
+        }
+    }
+
     static func preview(
         document: GeneralSpreadsheetDocument,
         mapping: TransactionColumnMapping,
@@ -185,6 +213,7 @@ enum GeneralSpreadsheetImporter {
         defaultDirection: TransactionDirection,
         defaultCategory: String,
         reconciliations: [ReconciliationRecord],
+        existingTransactions: [LedgerTransaction] = [],
         calendar: Calendar = .current
     ) -> GeneralSpreadsheetPreview {
         let mappingIssues = validate(mapping: mapping, headers: document.headers, accountID: accountID)
@@ -194,6 +223,7 @@ enum GeneralSpreadsheetImporter {
                 rows: document.rows.map { .init(sourceRow: $0.id, draft: nil, issues: ["Complete the field mapping above."]) }
             )
         }
+        let existing = ExistingTransactionIndex(transactions: existingTransactions, accountID: accountID, calendar: calendar)
         let rows = document.rows.map { row in
             previewRow(
                 row,
@@ -202,6 +232,7 @@ enum GeneralSpreadsheetImporter {
                 defaultDirection: defaultDirection,
                 defaultCategory: defaultCategory,
                 reconciliations: reconciliations,
+                existing: existing,
                 calendar: calendar
             )
         }
@@ -236,6 +267,7 @@ enum GeneralSpreadsheetImporter {
             defaultDirection: defaultDirection,
             defaultCategory: defaultCategory,
             reconciliations: reconciliations,
+            existingTransactions: try modelContext.fetch(FetchDescriptor<LedgerTransaction>()),
             calendar: calendar
         )
         guard preview.mappingIssues.isEmpty else { throw GeneralSpreadsheetImportError.invalidMapping }
@@ -327,6 +359,7 @@ enum GeneralSpreadsheetImporter {
         defaultDirection: TransactionDirection,
         defaultCategory: String,
         reconciliations: [ReconciliationRecord],
+        existing: ExistingTransactionIndex,
         calendar: Calendar
     ) -> GeneralSpreadsheetPreviewRow {
         var issues: [String] = []
@@ -348,6 +381,15 @@ enum GeneralSpreadsheetImporter {
             issues.append("Date falls in a reconciled, locked period.")
         }
 
+        if existing.matches(
+            day: calendar.startOfDay(for: date),
+            direction: amount.direction,
+            amountCents: amount.cents,
+            payee: row.value(at: mapping[.payee]),
+            reference: row.value(at: mapping[.reference])
+        ) {
+            issues.append("Matches a transaction already in this account on the same day with the same amount and payee or reference; likely a duplicate.")
+        }
         let clearedResult = parsedCleared(row.value(at: mapping[.cleared]))
         if let issue = clearedResult.issue { issues.append(issue) }
         let categoryText = row.value(at: mapping[.category])
@@ -415,8 +457,9 @@ enum GeneralSpreadsheetImporter {
     private static func parsedCleared(_ value: String) -> (value: Bool, issue: String?) {
         guard !value.isEmpty else { return (false, nil) }
         let normalized = normalizeHeader(value)
-        if ["true", "yes", "y", "1", "x", "cleared", "reconciled"].contains(normalized) { return (true, nil) }
-        if ["false", "no", "n", "0", "uncleared", "outstanding", "pending"].contains(normalized) { return (false, nil) }
+        // Bank exports label settled rows "Posted"; treat the common statement vocabulary as cleared/uncleared.
+        if ["true", "yes", "y", "1", "x", "c", "r", "cleared", "reconciled", "posted", "settled", "complete", "completed"].contains(normalized) { return (true, nil) }
+        if ["false", "no", "n", "0", "uncleared", "outstanding", "pending", "unposted", "hold", "processing"].contains(normalized) { return (false, nil) }
         return (false, "Unrecognized cleared status.")
     }
 
@@ -424,7 +467,12 @@ enum GeneralSpreadsheetImporter {
         guard !value.isEmpty else { return nil }
         // A `yyyy` pattern accepts a two-digit year ("1/15/24" becomes 15 January 0024) before the `yy`
         // patterns are ever tried, so each candidate must also land in a plausible year.
-        let formats = ["yyyy-MM-dd", "M/d/yyyy", "MM/dd/yyyy", "M/d/yy", "MM/dd/yy", "MMM d, yyyy", "MMMM d, yyyy"]
+        let formats = [
+            "yyyy-MM-dd", "M/d/yyyy", "MM/dd/yyyy", "M/d/yy", "MM/dd/yy", "MMM d, yyyy", "MMMM d, yyyy",
+            // Bank and card exports frequently carry a time of day.
+            "M/d/yyyy H:mm:ss", "M/d/yyyy H:mm", "M/d/yyyy h:mm a", "M/d/yyyy h:mm:ss a", "M/d/yy H:mm",
+            "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "MM-dd-yyyy", "M-d-yyyy",
+        ]
         for format in formats {
             let formatter = DateFormatter()
             formatter.calendar = calendar
@@ -445,14 +493,22 @@ enum GeneralSpreadsheetImporter {
         var cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return nil }
         let parenthesized = cleaned.hasPrefix("(") && cleaned.hasSuffix(")")
+        // Some statements write debits as "12.50-" or with a CR/DR suffix instead of a leading sign.
+        let trailingMinus = cleaned.hasSuffix("-")
+        let uppercased = cleaned.uppercased()
+        let debitSuffix = uppercased.hasSuffix("DR") || uppercased.hasSuffix(" DB")
         cleaned = cleaned
             .replacingOccurrences(of: "$", with: "")
             .replacingOccurrences(of: ",", with: "")
             .replacingOccurrences(of: "(", with: "")
             .replacingOccurrences(of: ")", with: "")
+            .replacingOccurrences(of: "+", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        for suffix in ["CR", "DR", "DB", "cr", "dr", "db", "-"] where cleaned.hasSuffix(suffix) {
+            cleaned = String(cleaned.dropLast(suffix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         guard var decimal = Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX")) else { return nil }
-        if parenthesized { decimal *= -1 }
+        if parenthesized || trailingMinus || debitSuffix { decimal = -abs(decimal) }
         var scaled = decimal * 100
         var rounded = Decimal()
         NSDecimalRound(&rounded, &scaled, 0, .plain)

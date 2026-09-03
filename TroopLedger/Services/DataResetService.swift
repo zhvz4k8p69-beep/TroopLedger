@@ -84,6 +84,16 @@ enum DataResetService {
             deletedRecordCount += try deleteAll(ExternalCalendarSubscription.self, from: modelContext)
             deletedRecordCount += try deleteAll(AuditLogEntry.self, from: modelContext)
 
+            // The old log is gone by design, but the new one must not begin silently: the first entry records
+            // that a reset happened, when, on which device, and how much it removed.
+            AuditLogger.record(
+                .delete,
+                recordType: "Database",
+                recordID: nil,
+                summary: "Deleted all records and started over",
+                details: AuditLogger.details([("Records deleted", String(deletedRecordCount))]),
+                in: modelContext
+            )
             try modelContext.save()
             return Result(deletedRecordCount: deletedRecordCount)
         } catch {

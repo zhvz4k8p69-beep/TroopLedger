@@ -257,7 +257,14 @@ struct ScoutbookIntegrationView: View {
         let detail = row.value(["Last Name", "Transaction Date", "Date", "Position", "Category", "Description"])
         let amount = row.value(["Amount", "Transaction Amount"])
         let values = [preferred, detail, amount].filter { !$0.isEmpty }
-        return values.isEmpty ? row.values.values.prefix(3).joined(separator: " • ") : values.joined(separator: " • ")
+        guard values.isEmpty else { return values.joined(separator: " • ") }
+        // Fall back to the first populated columns in file order rather than dictionary order.
+        return (document?.headers ?? [])
+            .compactMap { row.values[ScoutbookCSVDocument.normalizedHeader($0)] }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .prefix(3)
+            .joined(separator: " • ")
     }
 
     private func addSubscription() {

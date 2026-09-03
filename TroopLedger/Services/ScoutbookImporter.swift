@@ -54,6 +54,8 @@ struct ScoutbookImportResult {
     let updated: Int
     let skipped: Int
     let issues: [String]
+    /// One line per existing person whose role, status, rank, positions, or contact details the file changed.
+    var changes: [String] = []
 }
 
 enum ScoutbookImportError: LocalizedError, Equatable {
@@ -177,7 +179,7 @@ enum ScoutbookImporter {
             record.insertedCount = result.inserted
             record.updatedCount = result.updated
             record.skippedCount = result.skipped
-            record.notes = result.issues.joined(separator: "\n")
+            record.notes = (result.issues + result.changes).joined(separator: "\n")
             modelContext.insert(record)
             AuditLogger.record(
                 .importData,
@@ -190,7 +192,10 @@ enum ScoutbookImporter {
                     ("Inserted", String(record.insertedCount)),
                     ("Updated", String(record.updatedCount)),
                     ("Skipped", String(record.skippedCount)),
-                    ("Issues", record.notes),
+                    ("Issues", result.issues.joined(separator: "\n")),
+                    // A roster file can flip a leader to a Scout or deactivate a family; the audit entry
+                    // must show each such change, not only the count of updated rows.
+                    ("Changes", result.changes.joined(separator: "\n")),
                 ]),
                 in: modelContext
             )
@@ -210,6 +215,7 @@ enum ScoutbookImporter {
         var updated = 0
         var skipped = 0
         var issues: [String] = []
+        var changes: [String] = []
 
         for row in rows {
             let name = parsedName(row)
@@ -222,6 +228,7 @@ enum ScoutbookImporter {
             let role = parsedRole(row, defaultKind: kind)
             let existing = findPerson(memberID: memberID, firstName: name.first, lastName: name.last, in: people)
             let person: PersonRecord
+            let before = existing.map(personSnapshot)
             if let existing {
                 person = existing
                 updated += 1
@@ -253,9 +260,16 @@ enum ScoutbookImporter {
             if !importedPositions.isEmpty {
                 person.troopPositions = Array(Set(person.troopPositions).union(importedPositions))
             }
+            if let before {
+                let diff = AuditLogger.changes(from: before, to: personSnapshot(person))
+                if !diff.isEmpty {
+                    changes.append("\(person.displayName): " + diff.map { "\($0.0.replacingOccurrences(of: "Changed ", with: "")) \($0.1 ?? "")" }.joined(separator: "; "))
+                }
+            }
             guard role != .parent else { continue }
             let expiration = parsedDate(row.value(["Expiration Date", "Expires", "Registration Expiration"]))
-            let registrationDate = parsedDate(row.value(["Registration Date", "Registered On", "Start Date"])) ?? person.joinDate ?? Date()
+            let parsedRegistrationDate = parsedDate(row.value(["Registration Date", "Registered On", "Start Date"]))
+            let registrationDate = parsedRegistrationDate ?? person.joinDate ?? Date()
             let explicitProgramYear = row.value(["Program Year", "Registration Year", "Year"])
             let programYear = explicitProgramYear.isEmpty
                 ? String(Calendar.current.component(.year, from: expiration ?? registrationDate))
@@ -273,12 +287,29 @@ enum ScoutbookImporter {
             registration.unitRole = unitRole
             registration.status = person.isActive ? .current : .expired
             registration.expiresOn = expiration
-            registration.registeredOn = registrationDate
+            // Without a date in the file, "today" was stamped onto the registration on every re-import,
+            // overwriting the real registration date each time. Only a real date may replace an existing one.
+            if parsedRegistrationDate != nil || person.joinDate != nil || registration.sourceRow == 0 {
+                registration.registeredOn = registrationDate
+            }
             registration.sourceSheet = "Scoutbook Quick Export"
             registration.sourceRow = row.id
         }
 
-        return ScoutbookImportResult(inserted: inserted, updated: updated, skipped: skipped, issues: issues)
+        return ScoutbookImportResult(inserted: inserted, updated: updated, skipped: skipped, issues: issues, changes: changes)
+    }
+
+    private static func personSnapshot(_ person: PersonRecord) -> [(String, String)] {
+        [
+            ("Role", person.role.rawValue),
+            ("Active", person.isActive ? "Yes" : "No"),
+            ("Rank", person.currentRank.displayName),
+            ("Positions", person.positionSummary),
+            ("Patrol", person.patrol),
+            ("Scouting Member ID", person.scoutingMemberID),
+            ("Email", person.email),
+            ("Phone", person.phone),
+        ]
     }
 
     @MainActor

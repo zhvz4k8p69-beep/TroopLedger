@@ -28,13 +28,21 @@ struct BatchDepositListView: View {
                     }
                 }
             } else if batches.isEmpty {
-                EmptyMessage(
-                    title: "No deposit batches",
-                    message: "Record income in Undeposited Funds or use imported cash receipts, then build one bank deposit while preserving every allocation.",
-                    systemImage: "tray.and.arrow.up"
-                )
+                if undepositedAccount?.isActive == false {
+                    inactiveNotice
+                } else {
+                    EmptyMessage(
+                        title: "No deposit batches",
+                        message: "Record income in Undeposited Funds or use imported cash receipts, then build one bank deposit while preserving every allocation.",
+                        systemImage: "tray.and.arrow.up"
+                    )
+                }
             } else {
-                List(batches) { batch in
+                List {
+                    if undepositedAccount?.isActive == false {
+                        Section { inactiveNotice }
+                    }
+                    ForEach(batches) { batch in
                     NavigationLink {
                         BatchDepositDetailView(batch: batch)
                     } label: {
@@ -54,6 +62,7 @@ struct BatchDepositListView: View {
                         }
                         .padding(.vertical, 3)
                     }
+                    }
                 }
             }
         }
@@ -69,6 +78,12 @@ struct BatchDepositListView: View {
 
     private var destinationAccounts: [AccountRecord] {
         accounts.filter { $0.isActive && $0.kind != .cash && $0.kind != .undepositedFunds }
+    }
+
+    /// New Deposit was silently disabled whenever the holding account had been archived.
+    private var inactiveNotice: some View {
+        Label("The Undeposited Funds account is inactive. Reactivate it in Accounts to record new deposits.", systemImage: "exclamationmark.triangle.fill")
+            .foregroundStyle(.orange)
     }
 
     private func destinationName(_ id: UUID?) -> String {

@@ -447,18 +447,25 @@ enum ScoutbookCalendarService {
         default: return [event]
         }
 
+        let calendar = Calendar.current
         let duration = event.endDate.timeIntervalSince(event.startDate)
+        // All-day spans are measured in calendar days; adding raw seconds shifts the end by an hour across a
+        // daylight-saving change and drops the last day of a multi-day occurrence.
+        let dayCount = calendar.dateComponents([.day], from: calendar.startOfDay(for: event.startDate), to: calendar.startOfDay(for: event.endDate)).day ?? 0
         var results: [ScoutbookCalendarEvent] = []
         for index in 0..<count {
-            guard let start = Calendar.current.date(byAdding: component, value: index * interval, to: event.startDate) else { break }
+            guard let start = calendar.date(byAdding: component, value: index * interval, to: event.startDate) else { break }
             if let until, start > until { break }
             if start > horizon { break }
             let occurrenceID = "\(event.externalID)#\(Int(start.timeIntervalSince1970))"
+            let end = event.isAllDay
+                ? (calendar.date(byAdding: .day, value: dayCount, to: start) ?? start.addingTimeInterval(duration))
+                : start.addingTimeInterval(duration)
             results.append(ScoutbookCalendarEvent(
                 externalID: occurrenceID,
                 title: event.title,
                 startDate: start,
-                endDate: start.addingTimeInterval(duration),
+                endDate: end,
                 location: event.location,
                 notes: event.notes,
                 isAllDay: event.isAllDay,
