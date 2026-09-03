@@ -1,0 +1,87 @@
+name: TroopLedger
+options:
+  createIntermediateGroups: true
+  groupSortPosition: top
+  deploymentTarget:
+    iOS: "18.0"
+    macOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: targeted
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "25"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  TroopLedger-iOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: TroopLedger
+        excludes:
+          - Resources
+      - path: TroopLedger/Resources
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: TroopLedger
+        PRODUCT_BUNDLE_IDENTIFIER: com.bettnet.TroopLedger
+        CODE_SIGN_ENTITLEMENTS: Configuration/TroopLedger.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Configuration/TroopLedger-iOS-Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+  TroopLedger-macOS:
+    type: application
+    platform: macOS
+    sources:
+      - path: TroopLedger
+        excludes:
+          - Resources
+      - path: TroopLedger/Resources
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: TroopLedger
+        PRODUCT_BUNDLE_IDENTIFIER: com.bettnet.TroopLedger
+        CODE_SIGN_ENTITLEMENTS: Configuration/TroopLedger-macOS.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Configuration/TroopLedger-macOS-Info.plist
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+  TroopLedgerTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: TroopLedgerTests
+    dependencies:
+      - target: TroopLedger-macOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.bettnet.TroopLedgerTests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/TroopLedger.app/Contents/MacOS/TroopLedger"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+schemes:
+  TroopLedger-iOS:
+    build:
+      targets:
+        TroopLedger-iOS: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+  TroopLedger-macOS:
+    build:
+      targets:
+        TroopLedger-macOS: all
+        TroopLedgerTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - TroopLedgerTests
+    archive:
+      config: Release
