@@ -163,6 +163,10 @@ enum ReimbursementError: LocalizedError, Equatable {
     case transactionAlreadyLinked
     case paymentDateLocked(Date)
     case paymentDateInFuture
+    case selfApproval
+    case transactionBelongsToAnotherPerson
+    case requestNotReopenable
+    case reopenReasonRequired
 
     var errorDescription: String? {
         switch self {
@@ -186,6 +190,10 @@ enum ReimbursementError: LocalizedError, Equatable {
         case .transactionAlreadyLinked: "That ledger transaction is already linked to another reimbursement request."
         case .paymentDateLocked(let date): "The selected account is locked through \(date.formatted(date: .long, time: .omitted)). Choose a later payment date."
         case .paymentDateInFuture: "A reimbursement payment cannot be dated in the future. Record it on the day the check or transfer is issued."
+        case .selfApproval: "The person requesting a reimbursement cannot record its approval. Choose a different approver."
+        case .transactionBelongsToAnotherPerson: "That ledger entry is linked to a different person and cannot pay this request."
+        case .requestNotReopenable: "Only an approved-but-unpaid or declined request can be returned for review."
+        case .reopenReasonRequired: "Explain why this decision is being reopened."
         }
     }
 }
@@ -293,6 +301,10 @@ enum ReimbursementService {
         let reason = notes.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !reviewer.isEmpty else { throw ReimbursementError.reviewerRequired }
         if !approve && reason.isEmpty { throw ReimbursementError.declineReasonRequired }
+        // Advisory warnings cover look-alike names; a definitive roster match is refused outright.
+        if approve, let approverID = approver?.personID, approverID == request.requesterPersonID {
+            throw ReimbursementError.selfApproval
+        }
         request.status = approve ? .approved : .declined
         request.reviewerName = reviewer
         request.reviewNotes = reason
@@ -443,6 +455,9 @@ enum ReimbursementService {
             throw ReimbursementError.transactionMismatch
         }
         guard !transaction.isTransfer else { throw ReimbursementError.transferTransaction }
+        if let personID = transaction.personID, personID != request.requesterPersonID {
+            throw ReimbursementError.transactionBelongsToAnotherPerson
+        }
         let requests = try modelContext.fetch(FetchDescriptor<ReimbursementRequest>())
         guard !requests.contains(where: { $0.id != request.id && $0.linkedTransactionID == transaction.id }) else {
             throw ReimbursementError.transactionAlreadyLinked
@@ -454,6 +469,39 @@ enum ReimbursementService {
             reference: transaction.checkNumber,
             in: modelContext
         )
+    }
+
+    /// Returns an approved-but-unpaid or declined request to the review queue so a mistaken decision can be
+    /// corrected without deleting history. The previous decision stays in the audit log.
+    static func reopen(_ request: ReimbursementRequest, reason: String, at date: Date = Date(), in modelContext: ModelContext) throws {
+        let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedReason.isEmpty else { throw ReimbursementError.reopenReasonRequired }
+        guard request.status == .declined || (request.status == .approved && request.linkedTransactionID == nil) else {
+            throw ReimbursementError.requestNotReopenable
+        }
+        let previousStatus = request.status
+        let previousReviewer = request.reviewerName
+        let previousNotes = request.reviewNotes
+        request.status = .submitted
+        request.reviewerName = ""
+        request.reviewNotes = ""
+        request.reviewedAt = nil
+        request.modifiedAt = date
+        AuditLogger.record(
+            .edit,
+            recordType: "Reimbursement Request",
+            recordID: request.id,
+            summary: "Reopened \(previousStatus.rawValue.lowercased()) reimbursement request for review",
+            details: AuditLogger.details([
+                ("Previous decision", previousStatus.rawValue),
+                ("Previous reviewer", previousReviewer),
+                ("Previous review notes", previousNotes),
+                ("Reason for reopening", trimmedReason),
+            ]),
+            at: date,
+            in: modelContext
+        )
+        try modelContext.save()
     }
 
     private static func finishPayment(

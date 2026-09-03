@@ -216,12 +216,12 @@ struct RecharterForecastView: View {
         Form {
             Section("Visible Assumptions") {
                 TextField("Program year", text: $programYear)
-                LabeledContent("Active people included", value: "\(people.filter(\.isActive).count)")
+                LabeledContent("Active Scouts and leaders included", value: "\(people.filter { $0.isActive && ($0.role == .scout || $0.role == .leader) }.count)")
                 AmountField(title: "Registration cost per person", text: $perPersonCost)
                 AmountField(title: "Unit charter cost", text: $unitCharterCost)
                 AmountField(title: "Other known recharter costs", text: $otherCost)
                 AmountField(title: "Expected collections before payment", text: $expectedCollections)
-                Text("The forecast uses all active people. The assessed-registration total below is a reference from matching registration records; it does not silently replace your cost assumptions.")
+                Text("The forecast counts active Scouts and registered leaders; parents, guardians, and other contacts do not recharter. The assessed-registration total below is a reference from matching registration records; it does not silently replace your cost assumptions.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if let snapshot {

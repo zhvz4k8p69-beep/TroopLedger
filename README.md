@@ -50,6 +50,10 @@ Money is stored as integer cents, avoiding the rounding problems that can occur 
 
 Audit logging begins when version 0.6 or later is used. TroopLedger does not manufacture retrospective entries for changes made by older versions; existing source-sheet, source-row, import-history, and reconciliation metadata remains available for that earlier history.
 
+## Device lock
+
+Open **Preferences → Controls → Device Access** to require Face ID, Touch ID, or the device passcode whenever TroopLedger returns to the foreground. The lock is off by default and only affects the device where it is enabled; the shared database is not changed.
+
 ## Plaintext backup
 
 Open **Reports** and select **Export Full Plaintext Backup**. TroopLedger creates a dated `.troopledgerbackup` package that can be copied independently of iCloud. On a Mac, use **Show Package Contents** to inspect `backup.json`, the normalized CSV files, `attachments_manifest.csv`, and `README.txt`.

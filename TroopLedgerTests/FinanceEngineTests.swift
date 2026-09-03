@@ -487,7 +487,7 @@ final class FinanceEngineTests: XCTestCase {
         XCTAssertEqual(archive.recordCounts["operating_budgets"], 1)
         XCTAssertEqual(archive.recordCounts["budget_lines"], 1)
         XCTAssertEqual(archive.recordCounts["attachments_manifest"], 0)
-        XCTAssertEqual(Set(archive.files.keys), Set(expectedTables.map { "\($0).csv" } + ["backup.json", "README.txt"]))
+        XCTAssertEqual(Set(archive.files.keys), Set(expectedTables.map { "\($0).csv" } + ["backup.json", "README.txt", "manifest-sha256.csv"]))
 
         let jsonData = try XCTUnwrap(archive.files["backup.json"])
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: jsonData) as? [String: Any])
@@ -2965,5 +2965,163 @@ final class FinanceEngineTests: XCTestCase {
 
     func testAuditIdentityRecordsTheAppVersion() {
         XCTAssertTrue(AuditIdentity.current.operatingSystem.contains("TroopLedger"))
+    }
+
+    // MARK: - Regression tests for the fifth audit round
+
+    func testAppLockPolicyEngagesOnlyWhenEnabled() {
+        XCTAssertFalse(AppLockPolicy.shouldLock(isEnabled: false, movedToBackground: true, alreadyLocked: false))
+        XCTAssertTrue(AppLockPolicy.shouldLock(isEnabled: true, movedToBackground: true, alreadyLocked: false))
+        XCTAssertTrue(AppLockPolicy.shouldLock(isEnabled: true, movedToBackground: false, alreadyLocked: true))
+        XCTAssertFalse(AppLockPolicy.shouldLock(isEnabled: true, movedToBackground: false, alreadyLocked: false))
+    }
+
+    @MainActor
+    func testReviewRefusesDefinitiveSelfApproval() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let requester = PersonRecord(firstName: "Pat", lastName: "Parent", role: .parent)
+        let request = ReimbursementRequest(requesterPersonID: requester.id, purchaseDate: Date(), purpose: "Supplies", category: "Program Supplies", amountCents: 1_000)
+        context.insert(requester)
+        context.insert(request)
+        try context.save()
+        XCTAssertThrowsError(try ReimbursementService.review(request, approve: true, reviewerName: "Pat Parent", notes: "", approver: .init(personID: requester.id, name: "Pat Parent", household: ""), in: context)) { error in
+            XCTAssertEqual(error as? ReimbursementError, .selfApproval)
+        }
+        XCTAssertEqual(request.status, .submitted)
+        XCTAssertNoThrow(try ReimbursementService.review(request, approve: true, reviewerName: "Sam Chair", notes: "", approver: .init(personID: UUID(), name: "Sam Chair", household: ""), in: context))
+    }
+
+    @MainActor
+    func testLinkingPaymentRejectsAnotherPersonsTransaction() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let account = AccountRecord(name: "Checking")
+        let requester = PersonRecord(firstName: "Pat", lastName: "Parent", role: .parent)
+        let other = PersonRecord(firstName: "Sam", lastName: "Other", role: .leader)
+        let request = ReimbursementRequest(requesterPersonID: requester.id, purchaseDate: Date(), purpose: "Supplies", category: "Program Supplies", amountCents: 1_000)
+        request.status = .approved
+        let payment = LedgerTransaction(accountID: account.id, date: Date(), direction: .expense, amountCents: 1_000, payee: "Sam Other", category: "Program Supplies")
+        payment.personID = other.id
+        for record in [account] { context.insert(record) }
+        context.insert(requester); context.insert(other); context.insert(request); context.insert(payment)
+        try context.save()
+        XCTAssertThrowsError(try ReimbursementService.linkExistingPayment(for: request, transactionID: payment.id, in: context)) { error in
+            XCTAssertEqual(error as? ReimbursementError, .transactionBelongsToAnotherPerson)
+        }
+        XCTAssertEqual(request.status, .approved)
+    }
+
+    func testParticipantsWithRecordedPaymentsCannotBeDeleted() {
+        let paid = EventParticipant(eventID: UUID(), personID: UUID(), status: .registered)
+        paid.paidCents = 2_500
+        XCTAssertThrowsError(try EventParticipantPolicy.validateDeletion(paid)) { error in
+            XCTAssertEqual(error as? EventParticipantValidationError, .hasRecordedPayment("$25.00"))
+        }
+        XCTAssertNoThrow(try EventParticipantPolicy.validateDeletion(EventParticipant(eventID: UUID(), personID: UUID())))
+    }
+
+    @MainActor
+    func testPlaintextBackupCarriesAVerifiableManifest() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        context.insert(AccountRecord(name: "Checking"))
+        let archive = try PlaintextBackupService.makeArchive(from: context)
+        let manifest = try XCTUnwrap(String(data: XCTUnwrap(archive.files["manifest-sha256.csv"]), encoding: .utf8))
+        XCTAssertTrue(manifest.contains("backup.json"))
+        XCTAssertTrue(manifest.contains("accounts.csv"))
+        XCTAssertFalse(manifest.contains("manifest-sha256.csv,"))
+    }
+
+    @MainActor
+    func testAuditEntriesFallBackToTheTreasurerNameWhenTheSystemHasNone() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let profile = TroopProfileRecord()
+        profile.treasurerName = "Dana Treasurer"
+        context.insert(profile)
+        try context.save()
+        let anonymous = AuditIdentity(deviceName: "iPad", operatingSystem: "iOS", userIdentity: "")
+        let entry = AuditLogger.record(.create, recordType: "Test", recordID: nil, summary: "Test", identity: anonymous, in: context)
+        XCTAssertEqual(entry.userIdentity, "Dana Treasurer (troop profile)")
+        let named = AuditIdentity(deviceName: "Mac", operatingSystem: "macOS", userIdentity: "Local User")
+        XCTAssertEqual(AuditLogger.record(.create, recordType: "Test", recordID: nil, summary: "Test", identity: named, in: context).userIdentity, "Local User")
+    }
+
+    func testHoldingAccountsCannotBeOverdrawn() {
+        let cashBox = AccountRecord(name: "Cash Box", kind: .cash, openingBalanceCents: 1_000)
+        let checking = AccountRecord(name: "Checking", kind: .checking)
+        XCTAssertThrowsError(try HoldingAccountPolicy.validate(account: cashBox, transactions: [], editing: nil, direction: .expense, amountCents: 1_500)) { error in
+            XCTAssertEqual(error as? HoldingAccountValidationError, .wouldOverdraw(accountName: "Cash Box", shortfallCents: 500))
+        }
+        XCTAssertNoThrow(try HoldingAccountPolicy.validate(account: cashBox, transactions: [], editing: nil, direction: .expense, amountCents: 1_000))
+        XCTAssertNoThrow(try HoldingAccountPolicy.validate(account: checking, transactions: [], editing: nil, direction: .expense, amountCents: 99_999))
+        let existing = LedgerTransaction(accountID: cashBox.id, date: Date(), direction: .expense, amountCents: 800, payee: "Store", category: "Supplies")
+        XCTAssertNoThrow(try HoldingAccountPolicy.validate(account: cashBox, transactions: [existing], editing: existing.id, direction: .expense, amountCents: 1_000))
+        XCTAssertThrowsError(try HoldingAccountPolicy.validate(account: cashBox, transactions: [existing], editing: nil, direction: .expense, amountCents: 300))
+    }
+
+    @MainActor
+    func testAuditLogCSVListsEntriesChronologically() {
+        let later = AuditLogEntry(timestamp: Date(timeIntervalSince1970: 2_000), action: .edit, recordType: "Transaction", recordID: nil, summary: "=later", deviceName: "Mac", operatingSystem: "macOS", userIdentity: "Dana")
+        let earlier = AuditLogEntry(timestamp: Date(timeIntervalSince1970: 1_000), action: .create, recordType: "Account", recordID: nil, summary: "earlier", deviceName: "Mac", operatingSystem: "macOS", userIdentity: "Dana")
+        let csv = AuditLogger.csv(for: [later, earlier])
+        let lines = csv.components(separatedBy: "\r\n").filter { !$0.isEmpty }
+        XCTAssertEqual(lines.count, 3)
+        XCTAssertTrue(lines[1].contains("earlier"))
+        XCTAssertTrue(lines[2].contains("\"'=later\""))
+    }
+
+    func testRegistrationValidationExcludesTheRecordBeingEdited() {
+        let personID = UUID()
+        let existing = RegistrationRecord(personID: personID, programYear: "2026", unitRole: "Scout", status: .current)
+        XCTAssertThrowsError(try RegistrationPolicy.validate(personID: personID, programYear: "2026", registeredOn: Date(), expiresOn: nil, duesAssessedCents: 0, registrations: [existing]))
+        XCTAssertNoThrow(try RegistrationPolicy.validate(personID: personID, programYear: "2026", registeredOn: Date(), expiresOn: nil, duesAssessedCents: 0, registrations: [existing], excluding: existing.id))
+        let allocation = RecurringChargeAllocationRecord(batchID: UUID(), personID: personID, chargeDate: Date(), amountCents: 100)
+        allocation.registrationID = existing.id
+        XCTAssertFalse(RegistrationPolicy.canDelete(existing, allocations: [allocation]))
+        XCTAssertTrue(RegistrationPolicy.canDelete(existing, allocations: []))
+    }
+
+    @MainActor
+    func testReopeningReturnsADecisionToReviewAndKeepsItInTheAudit() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let request = ReimbursementRequest(requesterPersonID: UUID(), purchaseDate: Date(), purpose: "Supplies", category: "Program Supplies", amountCents: 1_000)
+        request.status = .declined
+        request.reviewerName = "Sam Chair"
+        request.reviewNotes = "Wrong receipt"
+        request.reviewedAt = Date()
+        context.insert(request)
+        try context.save()
+        XCTAssertThrowsError(try ReimbursementService.reopen(request, reason: " ", in: context)) { error in
+            XCTAssertEqual(error as? ReimbursementError, .reopenReasonRequired)
+        }
+        try ReimbursementService.reopen(request, reason: "Declined the wrong request", in: context)
+        XCTAssertEqual(request.status, .submitted)
+        XCTAssertNil(request.reviewedAt)
+        let audit = try XCTUnwrap(context.fetch(FetchDescriptor<AuditLogEntry>()).first { $0.summary.contains("Reopened") })
+        XCTAssertTrue(audit.details.contains("Sam Chair"))
+        XCTAssertTrue(audit.details.contains("Wrong receipt"))
+        request.status = .paid
+        XCTAssertThrowsError(try ReimbursementService.reopen(request, reason: "x", in: context)) { error in
+            XCTAssertEqual(error as? ReimbursementError, .requestNotReopenable)
+        }
+    }
+
+    func testColumnMappingPrefersPayeeOverDescription() {
+        let mapping = TransactionColumnMapping.detected(from: ["Date", "Description", "Payee", "Amount"])
+        XCTAssertEqual(mapping[.payee], 2)
+        XCTAssertEqual(mapping[.date], 0)
+        XCTAssertEqual(mapping[.amount], 3)
+    }
+
+    func testRecharterForecastIgnoresParentsAndOtherContacts() {
+        let parent = PersonRecord(firstName: "Pat", lastName: "Parent", role: .parent)
+        let scout = PersonRecord(firstName: "Alex", lastName: "Scout", role: .scout)
+        let other = PersonRecord(firstName: "Ordinary", lastName: "Contact", role: .other)
+        let forecast = RecharterForecastService.makeSnapshot(programYear: "2027", people: [parent, scout, other], registrations: [], accounts: [], transactions: [], perPersonCostCents: 7_500, unitCharterCostCents: 0, otherCostCents: 0, expectedCollectionsCents: 0)
+        XCTAssertEqual(forecast.activePersonCount, 1)
+        XCTAssertEqual(forecast.projectedRegistrationCostCents, 7_500)
     }
 }

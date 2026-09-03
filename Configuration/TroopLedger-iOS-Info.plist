@@ -24,6 +24,8 @@
 	<string>public.app-category.finance</string>
 	<key>NSCameraUsageDescription</key>
 	<string>TroopLedger uses the camera only when you choose to scan reimbursement receipts.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>TroopLedger uses Face ID only to unlock the troop's financial records when device authentication is turned on in Preferences.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

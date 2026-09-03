@@ -100,11 +100,14 @@ struct TroopReportHeader: View {
 struct AmountField: View {
     let title: String
     @Binding var text: String
+    /// The decimal pad has no minus key, so fields that may legitimately hold a negative value (an overdrawn
+    /// opening balance) need a keyboard that can type one.
+    var allowsNegative = false
 
     var body: some View {
         TextField(title, text: $text)
 #if os(iOS)
-            .keyboardType(.decimalPad)
+            .keyboardType(allowsNegative ? .numbersAndPunctuation : .decimalPad)
 #endif
     }
 }

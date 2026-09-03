@@ -2,9 +2,15 @@ import SwiftUI
 import SwiftData
 
 struct AuditLogView: View {
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \AuditLogEntry.timestamp, order: .reverse) private var entries: [AuditLogEntry]
     @State private var searchText = ""
     @State private var actionFilter: AuditAction?
+    @State private var exportDocument: ReimbursementApprovalCSVDocument?
+    @State private var exportFilename = "TroopLedger Audit Log.csv"
+    @State private var exportedCount = 0
+    @State private var showingExporter = false
+    @State private var exportMessage: String?
 
     private var filteredEntries: [AuditLogEntry] {
         entries.filter { entry in
@@ -52,7 +58,40 @@ struct AuditLogView: View {
         // Attached to the container rather than the list: when a search matched nothing, the list (and the
         // search field with it) disappeared, leaving no way to clear the search.
         .searchable(text: $searchText, prompt: "Summary, details, record, device, or user")
-        .pageHeader(title: "Audit Log")
+        .pageToolbar(title: "Audit Log") {
+            Button("Export CSV", systemImage: "square.and.arrow.up") { prepareExport() }
+                .disabled(entries.isEmpty)
+        }
+        .fileExporter(isPresented: $showingExporter, document: exportDocument, contentType: .commaSeparatedText, defaultFilename: exportFilename) { completeExport($0) }
+        .alert("Audit Log", isPresented: Binding(get: { exportMessage != nil }, set: { if !$0 { exportMessage = nil } })) {
+            Button("OK") { exportMessage = nil }
+        } message: { Text(exportMessage ?? "") }
+    }
+
+    /// Auditors and committee reviewers can receive the log on its own instead of a full backup of every record.
+    private func prepareExport() {
+        let components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        exportFilename = String(format: "TroopLedger Audit Log %04d-%02d-%02d.csv", components.year ?? 0, components.month ?? 0, components.day ?? 0)
+        exportedCount = entries.count
+        exportDocument = ReimbursementApprovalCSVDocument(csv: AuditLogger.csv(for: entries))
+        showingExporter = true
+    }
+
+    private func completeExport(_ result: Result<URL, Error>) {
+        switch result {
+        case .success(let url):
+            AuditLogger.record(.export, recordType: "Audit Log", recordID: nil, summary: "Exported audit log", details: AuditLogger.details([("File", url.lastPathComponent), ("Entries", String(exportedCount))]), in: modelContext)
+            do {
+                try modelContext.save()
+                exportMessage = "Exported \(exportedCount) audit entries."
+            } catch {
+                exportMessage = "The log was exported, but the export entry could not be saved: \(error.localizedDescription)"
+            }
+        case .failure(let error):
+            let nsError = error as NSError
+            guard !(error is CancellationError), nsError.code != NSUserCancelledError else { return }
+            exportMessage = "The audit log could not be exported: \(error.localizedDescription)"
+        }
     }
 }
 

@@ -1,4 +1,88 @@
+import LocalAuthentication
 import SwiftUI
+
+/// Optional device lock: when enabled in Preferences, the window blurs and asks for Face ID, Touch ID, or the
+/// device passcode after the app moves to the background, so a shared family iPad or an unattended Mac does
+/// not leave the troop's finances and contact details open.
+struct AppLockGate: ViewModifier {
+    @AppStorage(AppLockPolicy.storageKey) private var requiresAuthentication = false
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isLocked = false
+    @State private var isAuthenticating = false
+    @State private var failureMessage: String?
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if isLocked { lockScreen }
+            }
+            .onAppear {
+                if requiresAuthentication {
+                    isLocked = true
+                    authenticate()
+                }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                switch phase {
+                case .background:
+                    if AppLockPolicy.shouldLock(isEnabled: requiresAuthentication, movedToBackground: true, alreadyLocked: isLocked) {
+                        isLocked = true
+                    }
+                case .active:
+                    if isLocked { authenticate() }
+                default:
+                    break
+                }
+            }
+    }
+
+    private var lockScreen: some View {
+        ZStack {
+            Rectangle().fill(.regularMaterial).ignoresSafeArea()
+            VStack(spacing: 14) {
+                Image(systemName: "lock.fill").font(.system(size: 44)).foregroundStyle(.secondary)
+                Text("TroopLedger is locked").font(.title2.bold())
+                if let failureMessage {
+                    Text(failureMessage).font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+                Button("Unlock") { authenticate() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isAuthenticating)
+            }
+            .padding(32)
+        }
+    }
+
+    private func authenticate() {
+        guard !isAuthenticating else { return }
+        isAuthenticating = true
+        let context = LAContext()
+        var availabilityError: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &availabilityError) else {
+            isAuthenticating = false
+            failureMessage = availabilityError?.localizedDescription ?? "Device authentication is not available."
+            return
+        }
+        let locked = $isLocked
+        let authenticating = $isAuthenticating
+        let failure = $failureMessage
+        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Unlock the troop's financial records") { success, error in
+            Task { @MainActor in
+                authenticating.wrappedValue = false
+                if success {
+                    locked.wrappedValue = false
+                    failure.wrappedValue = nil
+                } else {
+                    failure.wrappedValue = error?.localizedDescription
+                }
+            }
+        }
+    }
+}
+
+extension View {
+    func appLockGate() -> some View { modifier(AppLockGate()) }
+}
 
 enum AppSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"

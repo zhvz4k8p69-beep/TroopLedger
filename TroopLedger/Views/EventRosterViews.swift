@@ -102,6 +102,12 @@ struct EventRosterView: View {
                     guard EventMutationPolicy.canEdit(event) else { return }
                     for index in offsets {
                         let participant = participants[index]
+                        do {
+                            try EventParticipantPolicy.validateDeletion(participant)
+                        } catch {
+                            errorMessage = error.localizedDescription
+                            continue
+                        }
                         AuditLogger.record(
                             .delete,
                             recordType: "Event Participant",
@@ -196,7 +202,8 @@ struct EventRosterView: View {
     }
 
     private func printRoster() {
-        let roster = EventRosterSnapshot(event: event, participants: participants, people: people, troopProfile: troopProfiles.first)
+        // A check-in sheet should not list people who cancelled.
+        let roster = EventRosterSnapshot(event: event, participants: participants.filter { $0.status != .cancelled }, people: people, troopProfile: troopProfiles.first)
         EventRosterPrinter.printRoster(roster)
     }
 }

@@ -275,9 +275,15 @@ struct ReimbursementDetailView: View {
     @State private var showingFileImporter = false
     @State private var selectedAttachment: ReimbursementAttachment?
     @State private var errorMessage: String?
+    @State private var showingReopen = false
+    @State private var reopenReason = ""
 #if os(iOS)
     @State private var showingScanner = false
 #endif
+
+    private var canReopen: Bool {
+        request.status == .declined || (request.status == .approved && request.linkedTransactionID == nil)
+    }
 
     private var attachments: [ReimbursementAttachment] {
         allAttachments.filter { $0.requestID == request.id }
@@ -389,6 +395,15 @@ struct ReimbursementDetailView: View {
                 }
             }
 
+            if canReopen {
+                Section("Correction") {
+                    Button("Reopen for Review", systemImage: "arrow.uturn.backward.circle") { showingReopen = true }
+                    Text("Returns the request to the review queue when a decision was made by mistake. The original decision stays in the audit log.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             if request.status == .paid, let transaction = linkedTransaction {
                 Section("Payment") {
                     LabeledContent("Date", value: (request.paymentDate ?? transaction.date).formatted(date: .long, time: .omitted))
@@ -426,6 +441,22 @@ struct ReimbursementDetailView: View {
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
         )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
+        .alert("Reopen this request for review?", isPresented: $showingReopen) {
+            TextField("Reason for reopening", text: $reopenReason)
+            Button("Reopen", role: .destructive) { reopen() }
+            Button("Cancel", role: .cancel) { reopenReason = "" }
+        } message: {
+            Text("The \(request.status.rawValue.lowercased()) decision will be cleared and the request returned to Submitted.")
+        }
+    }
+
+    private func reopen() {
+        do {
+            try ReimbursementService.reopen(request, reason: reopenReason, in: modelContext)
+            reopenReason = ""
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func importReceipt(_ result: Result<URL, Error>) {
@@ -483,7 +514,7 @@ private struct ReimbursementReviewView: View {
     @State private var notes = ""
     @State private var errorMessage: String?
 
-    private var adults: [PersonRecord] { people.filter { $0.role != .scout } }
+    private var adults: [PersonRecord] { people.filter { $0.role != .scout && $0.isActive } }
     private var controlPolicy: DisbursementControlPolicy { DisbursementControlPolicy(settings: controlSettings.first) }
 
     var body: some View {
@@ -579,6 +610,7 @@ private struct ReimbursementPaymentView: View {
             $0.direction == .expense
                 && !$0.isTransfer
                 && $0.amountCents == request.amountCents
+                && ($0.personID == nil || $0.personID == request.requesterPersonID)
                 && (!linked.contains($0.id) || $0.id == request.linkedTransactionID)
         }
     }

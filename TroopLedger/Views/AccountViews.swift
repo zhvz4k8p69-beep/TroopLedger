@@ -177,7 +177,7 @@ struct AccountFormView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
-                    AmountField(title: "Opening balance", text: $openingBalance)
+                    AmountField(title: "Opening balance", text: $openingBalance, allowsNegative: true)
                         .disabled(openingBalanceIsLocked)
                     if openingBalanceIsLocked {
                         Text("The opening balance is fixed because this account has completed reconciliations. Record a future-dated adjustment instead of rewriting locked history.")

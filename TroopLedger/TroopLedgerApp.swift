@@ -10,6 +10,7 @@ struct TroopLedgerApp: App {
         WindowGroup {
             RootView()
                 .troopLedgerAppearance()
+                .appLockGate()
         }
         .modelContainer(container)
         .commands {
@@ -20,6 +21,7 @@ struct TroopLedgerApp: App {
             PreferencesView(showsDismissButton: false)
                 .modelContainer(container)
                 .troopLedgerAppearance()
+                .appLockGate()
         }
         .defaultSize(width: 760, height: 720)
         .windowResizability(.contentMinSize)
@@ -27,6 +29,7 @@ struct TroopLedgerApp: App {
         WindowGroup {
             RootView()
                 .troopLedgerAppearance()
+                .appLockGate()
         }
         .modelContainer(container)
 #endif

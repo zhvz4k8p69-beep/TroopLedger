@@ -797,6 +797,12 @@ struct EventDetailView: View {
         guard EventMutationPolicy.canEdit(event) else { return }
         for index in offsets {
             let participant = participants[index]
+            do {
+                try EventParticipantPolicy.validateDeletion(participant)
+            } catch {
+                notesError = error.localizedDescription
+                continue
+            }
             AuditLogger.record(
                 .delete,
                 recordType: "Event Participant",

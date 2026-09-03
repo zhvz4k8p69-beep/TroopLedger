@@ -294,7 +294,7 @@ enum CommitteeReportPackageService {
         return String(format: "TroopLedger Committee Snapshot %04d-%02d-%02d.troopledgercommittee", components.year ?? 0, components.month ?? 0, components.day ?? 0)
     }
 
-    fileprivate static func manifest(for files: [String: Data]) -> Data {
+    static func manifest(for files: [String: Data]) -> Data {
         let rows = [["path", "byte_count", "sha256"]] + files.sorted { $0.key < $1.key }.map { path, data in
             [path, String(data.count), SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()]
         }
@@ -392,7 +392,9 @@ enum RecharterForecastService {
         otherCostCents: Int64,
         expectedCollectionsCents: Int64
     ) -> RecharterForecastSnapshot {
-        let active = people.filter(\.isActive)
+        // Council registration is paid for Scouts and registered adult leaders. Parents, guardians, and
+        // other contacts on the roster do not recharter, so counting them overstated the projected cost.
+        let active = people.filter { $0.isActive && ($0.role == .scout || $0.role == .leader) }
         let activeIDs = Set(active.map(\.id))
         let wantedYear = programYear.trimmingCharacters(in: .whitespacesAndNewlines)
         let matching = registrations.filter {

@@ -279,6 +279,7 @@ enum RegistrationPolicy {
         expiresOn: Date?,
         duesAssessedCents: Int64,
         registrations: [RegistrationRecord],
+        excluding editingRegistrationID: UUID? = nil,
         calendar: Calendar = .current
     ) throws {
         let normalizedYear = programYear.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -290,11 +291,57 @@ enum RegistrationPolicy {
             }
         }
         guard !registrations.contains(where: {
-            $0.personID == personID
+            $0.id != editingRegistrationID
+                && $0.personID == personID
                 && $0.programYear.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedYear
         }) else {
             throw RegistrationValidationError.duplicateProgramYear
         }
+    }
+
+    /// A registration that a posted charge batch used as its dues source must stay so the batch's history holds.
+    static func canDelete(_ registration: RegistrationRecord, allocations: [RecurringChargeAllocationRecord]) -> Bool {
+        !allocations.contains { $0.registrationID == registration.id }
+    }
+}
+
+enum HoldingAccountValidationError: LocalizedError, Equatable {
+    case wouldOverdraw(accountName: String, shortfallCents: Int64)
+
+    var errorDescription: String? {
+        switch self {
+        case .wouldOverdraw(let name, let shortfall):
+            "\(name) would go \(Money.currency(cents: shortfall)) below zero. Cash boxes and Undeposited Funds can only pay out money that was received."
+        }
+    }
+}
+
+enum HoldingAccountPolicy {
+    /// Undeposited Funds and Cash on Hand hold physical money; an entry that spends more than they contain
+    /// records cash that never existed. Bank accounts may legitimately overdraw and are not checked.
+    static func validate(
+        account: AccountRecord,
+        transactions: [LedgerTransaction],
+        editing editedTransactionID: UUID?,
+        direction: TransactionDirection,
+        amountCents: Int64
+    ) throws {
+        guard account.kind == .cash || account.kind == .undepositedFunds, direction == .expense else { return }
+        let others = transactions.filter { $0.id != editedTransactionID }
+        let projected = FinanceEngine.bookBalance(account: account, transactions: others) - amountCents
+        if projected < 0 {
+            throw HoldingAccountValidationError.wouldOverdraw(accountName: account.name, shortfallCents: -projected)
+        }
+    }
+}
+
+/// Decides when the optional device lock engages. Kept free of UI so the rule can be tested.
+enum AppLockPolicy {
+    static let storageKey = "security.requiresDeviceAuthentication"
+
+    static func shouldLock(isEnabled: Bool, movedToBackground: Bool, alreadyLocked: Bool) -> Bool {
+        guard isEnabled else { return false }
+        return alreadyLocked || movedToBackground
     }
 }
 

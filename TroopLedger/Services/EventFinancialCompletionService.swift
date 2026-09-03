@@ -120,6 +120,7 @@ enum EventParticipantValidationError: LocalizedError, Equatable {
     case negativeFee
     case negativePaid
     case feeScheduleWrongEvent
+    case hasRecordedPayment(String)
 
     var errorDescription: String? {
         switch self {
@@ -129,11 +130,19 @@ enum EventParticipantValidationError: LocalizedError, Equatable {
         case .negativeFee: "Participant fees cannot be negative."
         case .negativePaid: "Participant payments cannot be negative."
         case .feeScheduleWrongEvent: "The selected fee schedule belongs to a different event or no longer exists."
+        case .hasRecordedPayment(let amount): "\(amount) was recorded as paid for this participant. Mark them Cancelled instead of removing the record of the payment."
         }
     }
 }
 
 enum EventParticipantPolicy {
+    /// A roster row with a recorded payment is a money record; deleting it erases the only trace of that cash.
+    static func validateDeletion(_ participant: EventParticipant) throws {
+        guard participant.paidCents == 0 else {
+            throw EventParticipantValidationError.hasRecordedPayment(Money.currency(cents: participant.paidCents))
+        }
+    }
+
     static func validate(
         event: EventRecord,
         participant: EventParticipant,

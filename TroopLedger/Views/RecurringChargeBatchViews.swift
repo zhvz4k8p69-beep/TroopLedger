@@ -79,8 +79,10 @@ private struct RecurringChargeBatchBuilderView: View {
         people.filter { includeInactive || $0.isActive }
     }
 
+    /// "Select Eligible" for dues picks Scouts; parents and other contacts are not charged troop dues and
+    /// were being swept into batches by the bulk button. Anyone can still be selected individually.
     private var selectablePeople: [PersonRecord] {
-        guard kind == .registration else { return visiblePeople }
+        guard kind == .registration else { return visiblePeople.filter { $0.role == .scout } }
         return visiblePeople.filter {
             (RecurringChargeBatchService.assessedDues(for: $0.id, programYear: programYear, registrations: registrations) ?? 0) > 0
         }
@@ -139,7 +141,9 @@ private struct RecurringChargeBatchBuilderView: View {
             } header: {
                 Text("People")
             } footer: {
-                Text("\(selectedPersonIDs.count) selected. Registration rows without positive assessed dues for the chosen year cannot be selected.")
+                Text(kind == .dues
+                    ? "\(selectedPersonIDs.count) selected. Select Eligible chooses active Scouts; tap individual leaders or others to add them."
+                    : "\(selectedPersonIDs.count) selected. Registration rows without positive assessed dues for the chosen year cannot be selected.")
             }
 
             Section("Proposed Charges") {
@@ -170,20 +174,25 @@ private struct RecurringChargeBatchBuilderView: View {
         .onAppear {
             if programYear.isEmpty { programYear = programYears.first ?? "" }
         }
-        .onChange(of: kind) { _, newValue in
+        .onChange(of: kind) { oldValue, newValue in
             selectedPersonIDs.removeAll()
+            // Only replace the name and category when they still hold the previous kind's defaults, so a
+            // batch name the treasurer typed is not thrown away by toggling the type.
+            let previous = Self.defaults(for: oldValue)
+            let next = Self.defaults(for: newValue)
+            if name == previous.name { name = next.name }
+            if category == previous.category { category = next.category }
             if newValue == .registration {
-                name = "Registration Charges"
-                category = "Registration"
                 programYear = programYear.isEmpty ? (programYears.first ?? "") : programYear
-            } else {
-                name = "Monthly Dues"
-                category = "Dues"
             }
         }
         .onChange(of: programYear) { _, _ in
             if kind == .registration { selectedPersonIDs.removeAll() }
         }
+    }
+
+    private static func defaults(for kind: RecurringChargeBatchKind) -> (name: String, category: String) {
+        kind == .registration ? ("Registration Charges", "Registration") : ("Monthly Dues", "Dues")
     }
 
     private func personButton(_ person: PersonRecord) -> some View {

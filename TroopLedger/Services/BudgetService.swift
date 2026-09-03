@@ -51,9 +51,11 @@ enum CategoryCatalog {
         definitions.append(contentsOf: usedDefinitions)
 
         var inserted = 0
+        var insertedNames: [String] = []
         for (index, definition) in definitions.enumerated() {
             let definitionKey = key(name: definition.0, direction: definition.1)
             guard !known.contains(definitionKey) else { continue }
+            insertedNames.append("\(definition.0) (\(definition.1.rawValue))")
             context.insert(LedgerCategoryRecord(
                 name: definition.0,
                 direction: definition.1,
@@ -69,7 +71,8 @@ enum CategoryCatalog {
                 .create,
                 recordType: "Category Catalog",
                 recordID: nil,
-                summary: "Added (inserted) missing ledger category definitions",
+                summary: "Added \(inserted) missing ledger category definition\(inserted == 1 ? "" : "s")",
+                details: AuditLogger.details([("Categories", insertedNames.joined(separator: "\n"))]),
                 in: context
             )
             try context.save()

@@ -103,6 +103,20 @@ struct PeopleListView: View {
                 }
             }
 
+            if activityFilter == .active, inactiveBalances.count > 0 {
+                Section {
+                    Button {
+                        activityFilter = .inactive
+                    } label: {
+                        Label(
+                            "\(inactiveBalances.count) inactive \(inactiveBalances.count == 1 ? "person" : "people") still carry balances totaling \(Money.currency(cents: inactiveBalances.total))",
+                            systemImage: "exclamationmark.circle"
+                        )
+                        .foregroundStyle(.orange)
+                    }
+                }
+            }
+
             if filtered.isEmpty {
                 ContentUnavailableView {
                     Label(emptyTitle, systemImage: searchText.isEmpty ? "person.slash" : "magnifyingglass")
@@ -166,6 +180,14 @@ struct PeopleListView: View {
         }
     }
 
+    /// The default Active filter hid money still owed by or to families who left.
+    private var inactiveBalances: (count: Int, total: Int64) {
+        let balances = people.filter { !$0.isActive }
+            .map { FinanceEngine.memberBalance(personID: $0.id, entries: entries) }
+            .filter { $0 != 0 }
+        return (balances.count, balances.reduce(0, +))
+    }
+
     private var emptyTitle: String {
         if !searchText.isEmpty { return "No matches" }
         return switch activityFilter {
@@ -225,12 +247,17 @@ struct PeopleListView: View {
 
 struct PersonDetailView: View {
     let person: PersonRecord
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \MemberLedgerEntry.date, order: .reverse) private var allEntries: [MemberLedgerEntry]
     @Query(sort: \RegistrationRecord.registeredOn, order: .reverse) private var allRegistrations: [RegistrationRecord]
     @Query private var events: [EventRecord]
+    @Query private var chargeAllocations: [RecurringChargeAllocationRecord]
     @State private var showingEdit = false
     @State private var showingEntry = false
     @State private var showingRegistration = false
+    @State private var editingRegistration: RegistrationRecord?
+    @State private var pendingRegistrationDeletion: RegistrationRecord?
+    @State private var errorMessage: String?
 
     private var entries: [MemberLedgerEntry] { allEntries.filter { $0.personID == person.id } }
     private var registrations: [RegistrationRecord] { allRegistrations.filter { $0.personID == person.id } }
@@ -258,13 +285,18 @@ struct PersonDetailView: View {
                     Text("No registration records").foregroundStyle(.secondary)
                 } else {
                     ForEach(registrations) { registration in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack { Text(registration.programYear).font(.headline); Spacer(); Text(registration.status.rawValue).foregroundStyle(.secondary) }
-                            Text([registration.unitRole, Money.currency(cents: registration.duesAssessedCents)].filter { !$0.isEmpty }.joined(separator: " • "))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        Button { editingRegistration = registration } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack { Text(registration.programYear).font(.headline); Spacer(); Text(registration.status.rawValue).foregroundStyle(.secondary) }
+                                Text([registration.unitRole, Money.currency(cents: registration.duesAssessedCents)].filter { !$0.isEmpty }.joined(separator: " • "))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
                     }
+                    .onDelete(perform: requestRegistrationDeletion)
                 }
                 Button("Add Registration", systemImage: "person.badge.plus") { showingRegistration = true }
             }
@@ -303,9 +335,56 @@ struct PersonDetailView: View {
         .sheet(isPresented: $showingEdit) { PersonFormView(person: person) }
         .sheet(isPresented: $showingEntry) { MemberEntryFormView(person: person) }
         .sheet(isPresented: $showingRegistration) { RegistrationFormView(person: person) }
+        .sheet(item: $editingRegistration) { RegistrationFormView(person: person, registration: $0) }
+        .confirmationDialog(
+            "Delete this registration?",
+            isPresented: Binding(get: { pendingRegistrationDeletion != nil }, set: { if !$0 { pendingRegistrationDeletion = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingRegistrationDeletion
+        ) { registration in
+            Button("Delete \(registration.programYear) registration", role: .destructive) { deleteRegistration(registration) }
+            Button("Cancel", role: .cancel) { pendingRegistrationDeletion = nil }
+        } message: { registration in
+            Text("The \(registration.programYear) registration for \(person.displayName) will be removed permanently.")
+        }
+        .alert("Registration", isPresented: Binding(
+            get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
+        )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
     }
 
     private func eventName(_ id: UUID?) -> String? { events.first(where: { $0.id == id })?.name }
+
+    private func requestRegistrationDeletion(at offsets: IndexSet) {
+        guard let index = offsets.first else { return }
+        let registration = registrations[index]
+        guard RegistrationPolicy.canDelete(registration, allocations: chargeAllocations) else {
+            errorMessage = "A posted charge batch used this registration's assessed dues. It is part of that batch's history and cannot be deleted."
+            return
+        }
+        pendingRegistrationDeletion = registration
+    }
+
+    private func deleteRegistration(_ registration: RegistrationRecord) {
+        AuditLogger.record(
+            .delete,
+            recordType: "Registration",
+            recordID: registration.id,
+            summary: "Deleted \(registration.programYear) registration for \(person.displayName)",
+            details: AuditLogger.details([
+                ("Unit role", registration.unitRole),
+                ("Status", registration.status.rawValue),
+                ("Dues assessed", Money.currency(cents: registration.duesAssessedCents)),
+            ]),
+            in: modelContext
+        )
+        modelContext.delete(registration)
+        pendingRegistrationDeletion = nil
+        do {
+            try modelContext.save()
+        } catch {
+            errorMessage = "The registration could not be deleted: \(error.localizedDescription)"
+        }
+    }
 }
 
 struct PersonFormView: View {
@@ -660,16 +739,30 @@ struct RegistrationFormView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     let person: PersonRecord
+    private let registration: RegistrationRecord?
     @Query private var registrations: [RegistrationRecord]
-    @State private var programYear = String(Calendar.current.component(.year, from: Date()))
-    @State private var unitRole = ""
-    @State private var status = RegistrationStatus.current
-    @State private var registeredOn = Date()
-    @State private var hasExpiration = false
-    @State private var expiresOn = Date()
-    @State private var dues = "0.00"
-    @State private var notes = ""
+    @State private var programYear: String
+    @State private var unitRole: String
+    @State private var status: RegistrationStatus
+    @State private var registeredOn: Date
+    @State private var hasExpiration: Bool
+    @State private var expiresOn: Date
+    @State private var dues: String
+    @State private var notes: String
     @State private var errorMessage: String?
+
+    init(person: PersonRecord, registration: RegistrationRecord? = nil) {
+        self.person = person
+        self.registration = registration
+        _programYear = State(initialValue: registration?.programYear ?? String(Calendar.current.component(.year, from: Date())))
+        _unitRole = State(initialValue: registration?.unitRole ?? "")
+        _status = State(initialValue: registration?.status ?? .current)
+        _registeredOn = State(initialValue: registration?.registeredOn ?? Date())
+        _hasExpiration = State(initialValue: registration?.expiresOn != nil)
+        _expiresOn = State(initialValue: registration?.expiresOn ?? Date())
+        _dues = State(initialValue: Money.editableString(cents: registration?.duesAssessedCents ?? 0))
+        _notes = State(initialValue: registration?.notes ?? "")
+    }
 
     var body: some View {
         NavigationStack {
@@ -687,7 +780,7 @@ struct RegistrationFormView: View {
                 Section("Notes") { TextField("Optional notes", text: $notes, axis: .vertical) }
             }
             .formStyle(.grouped)
-            .navigationTitle("New Registration")
+            .navigationTitle(registration == nil ? "New Registration" : "Edit Registration")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(!canSave) }
@@ -712,8 +805,21 @@ struct RegistrationFormView: View {
             registeredOn: registeredOn,
             expiresOn: hasExpiration ? expiresOn : nil,
             duesAssessedCents: cents,
-            registrations: registrations
+            registrations: registrations,
+            excluding: registration?.id
         )) != nil
+    }
+
+    private func snapshot(_ record: RegistrationRecord) -> [(String, String)] {
+        [
+            ("Program year", record.programYear),
+            ("Unit role", record.unitRole),
+            ("Status", record.status.rawValue),
+            ("Registered", record.registeredOn.formatted(date: .numeric, time: .omitted)),
+            ("Expires", record.expiresOn?.formatted(date: .numeric, time: .omitted) ?? ""),
+            ("Dues assessed", Money.currency(cents: record.duesAssessedCents)),
+            ("Notes", record.notes),
+        ]
     }
 
     private func save() {
@@ -726,30 +832,36 @@ struct RegistrationFormView: View {
                 registeredOn: registeredOn,
                 expiresOn: expiration,
                 duesAssessedCents: cents,
-                registrations: registrations
+                registrations: registrations,
+                excluding: registration?.id
             )
-            let record = RegistrationRecord(
+            let isNew = registration == nil
+            let before = registration.map(snapshot)
+            let record = registration ?? RegistrationRecord(
                 personID: person.id,
                 programYear: programYear.trimmingCharacters(in: .whitespacesAndNewlines),
                 unitRole: unitRole.trimmingCharacters(in: .whitespacesAndNewlines),
                 status: status
             )
+            record.programYear = programYear.trimmingCharacters(in: .whitespacesAndNewlines)
+            record.unitRole = unitRole.trimmingCharacters(in: .whitespacesAndNewlines)
+            record.status = status
             record.registeredOn = registeredOn
             record.expiresOn = expiration
             record.duesAssessedCents = cents
             record.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
-            modelContext.insert(record)
+            if isNew { modelContext.insert(record) }
             AuditLogger.record(
-                .create,
+                isNew ? .create : .edit,
                 recordType: "Registration",
                 recordID: record.id,
-                summary: "Added \(record.programYear) registration for \(person.displayName)",
+                summary: "\(isNew ? "Added" : "Edited") \(record.programYear) registration for \(person.displayName)",
                 details: AuditLogger.details([
                     ("Unit role", record.unitRole),
                     ("Status", record.status.rawValue),
                     ("Registered", record.registeredOn.formatted(date: .numeric, time: .omitted)),
                     ("Dues assessed", Money.currency(cents: record.duesAssessedCents)),
-                ]),
+                ] + (before.map { AuditLogger.changes(from: $0, to: snapshot(record)) } ?? [])),
                 in: modelContext
             )
             try modelContext.save()

@@ -644,6 +644,7 @@ private struct TransactionEditorView: View {
     @Query(sort: \EventRecord.startDate, order: .reverse) private var events: [EventRecord]
     @Query(sort: \ReconciliationRecord.statementDate, order: .reverse) private var reconciliations: [ReconciliationRecord]
     @Query(sort: \LedgerCategoryRecord.sortOrder) private var categoryDefinitions: [LedgerCategoryRecord]
+    @Query private var allTransactions: [LedgerTransaction]
     private let transaction: LedgerTransaction?
     private let adjustedTransaction: LedgerTransaction?
     @State private var accountID: UUID?
@@ -873,6 +874,14 @@ private struct TransactionEditorView: View {
 
     private func save() {
         guard canSave, let cents = Money.cents(from: amount), cents > 0 else { return }
+        if let account = accounts.first(where: { $0.id == accountID }) {
+            do {
+                try HoldingAccountPolicy.validate(account: account, transactions: allTransactions, editing: transaction?.id, direction: direction, amountCents: cents)
+            } catch {
+                errorMessage = error.localizedDescription
+                return
+            }
+        }
         let accountName: (UUID?) -> String = { id in accounts.first { $0.id == id }?.name ?? "No account" }
         let before = transaction.map { TransactionSnapshot($0, accountName: accountName) }
         let record = transaction ?? LedgerTransaction(accountID: accountID, date: date, direction: direction, amountCents: cents, payee: payee, category: category)

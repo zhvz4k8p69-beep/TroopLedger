@@ -114,6 +114,9 @@ enum PlaintextBackupService {
         }
         files["backup.json"] = try encoder.encode(document)
         files["README.txt"] = Data(readme(generatedAt: generatedAt, applicationVersion: applicationVersion).utf8)
+        // The committee and audit packages already ship a SHA-256 manifest; the handoff backup needs one too,
+        // so a recipient can tell whether any file changed between export and restore.
+        files["manifest-sha256.csv"] = CommitteeReportPackageService.manifest(for: files)
 
         return PlaintextBackupArchive(
             files: files,
@@ -295,7 +298,7 @@ enum PlaintextBackupService {
         Application version: \(applicationVersion)
         Generated at: \(generatedAt)
 
-        backup.json contains the complete normalized snapshot. Each table is also present as a UTF-8, RFC 4180-style CSV file. UUID fields preserve relationships between tables. Dates use UTC ISO 8601, and money is stored as integer cents.
+        backup.json contains the complete normalized snapshot. Each table is also present as a UTF-8, RFC 4180-style CSV file. UUID fields preserve relationships between tables. Dates use UTC ISO 8601, and money is stored as integer cents. manifest-sha256.csv lists the byte count and SHA-256 checksum of every other file in this package; verify it before relying on a copy.
 
         troop_profile.csv preserves the unit identity, mailing and contact details, treasurer information, and report-header settings. attachments_manifest.csv lists reimbursement receipt files, their owning request, relative path, media type, byte count, and SHA-256 checksum. The receipt files are stored beneath the attachments directory. Reimbursement rows preserve recorded approver and signer identity snapshots, and disbursement_control_settings.csv preserves the advisory warning policy. Deposit batches, their receipt allocations, and both linked account-transfer entries are preserved in deposit_batches.csv, deposit_allocations.csv, and transactions.csv. Event fee assumptions, fee schedules, frozen close-outs, and their immutable participant allocations are preserved in the event tables.
 

@@ -1,3 +1,4 @@
+import LocalAuthentication
 import SwiftData
 import SwiftUI
 
@@ -322,6 +323,23 @@ struct DisbursementControlSettingsView: View {
     @State private var resetMessage: String?
     @State private var resetError: String?
     @State private var isResetting = false
+    @State private var backupAcknowledged = false
+    @AppStorage(AppLockPolicy.storageKey) private var requiresDeviceAuthentication = false
+
+    private var deviceLockBinding: Binding<Bool> {
+        Binding(
+            get: { requiresDeviceAuthentication },
+            set: { enabled in
+                guard enabled else { requiresDeviceAuthentication = false; return }
+                var availabilityError: NSError?
+                if LAContext().canEvaluatePolicy(.deviceOwnerAuthentication, error: &availabilityError) {
+                    requiresDeviceAuthentication = true
+                } else {
+                    errorMessage = availabilityError?.localizedDescription ?? "Set a device passcode, Touch ID, or Face ID before turning on the lock."
+                }
+            }
+        )
+    }
 
     var body: some View {
         NavigationStack {
@@ -355,6 +373,13 @@ struct DisbursementControlSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Device Access") {
+                    Toggle("Require Face ID, Touch ID, or passcode", isOn: deviceLockBinding)
+                    Text("When on, TroopLedger locks whenever it moves to the background on this device and asks for device authentication before showing the books again. Other devices are not affected.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Start Over") {
                     Label {
                         Text("Deleting all records is permanent. It removes the troop profile, accounts, transactions, people, events, receipts, reports, import history, and audit log from this database and from devices synced through iCloud.")
@@ -372,10 +397,11 @@ struct DisbursementControlSettingsView: View {
                     }
                     .disabled(isResetting)
 
+                    Toggle("I have a current backup of these records", isOn: $backupAcknowledged)
                     Button("Delete All Records and Start Over", systemImage: "trash", role: .destructive) {
                         showingFirstResetConfirmation = true
                     }
-                    .disabled(isResetting)
+                    .disabled(isResetting || !backupAcknowledged)
                 }
             }
             .formStyle(.grouped)
@@ -518,6 +544,7 @@ struct DisbursementControlSettingsView: View {
                 ]),
                 in: modelContext
             )
+            backupAcknowledged = true
             do {
                 try modelContext.save()
                 backupMessage = "Backup exported successfully with \(backupRecordCount) records. Keep it in a secure location."
@@ -591,8 +618,10 @@ struct DisbursementControlEditorView: View {
         _notes = State(initialValue: request.disbursementControlNotes)
     }
 
+    /// Departed leaders stay off the evidence pickers; an already-recorded identity remains selectable.
     private var adults: [PersonRecord] {
-        people.filter { $0.role != .scout }
+        let recorded: Set<UUID?> = [approverPersonID, signerOnePersonID, signerTwoPersonID]
+        return people.filter { $0.role != .scout && ($0.isActive || recorded.contains($0.id)) }
     }
 
     var body: some View {

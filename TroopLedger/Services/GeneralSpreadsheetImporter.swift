@@ -46,8 +46,14 @@ struct TransactionColumnMapping: Equatable {
         ]
         let normalized = headers.map(normalizeHeader)
         for field in TransactionImportField.allCases {
-            let candidates = aliases[field, default: []].map(normalizeHeader)
-            if let index = normalized.firstIndex(where: candidates.contains) { mapping[field] = index }
+            // Aliases are listed best-first; a file with both "Description" and "Payee" columns must map
+            // the payee, not whichever column happens to come first.
+            for alias in aliases[field, default: []].map(normalizeHeader) {
+                if let index = normalized.firstIndex(of: alias) {
+                    mapping[field] = index
+                    break
+                }
+            }
         }
 
         // Prefer a single amount column when present; separate income/expense columns remain an alternate mapping mode.

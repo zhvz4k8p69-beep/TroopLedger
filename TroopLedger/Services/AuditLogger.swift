@@ -56,6 +56,16 @@ enum AuditLogger {
         identity: AuditIdentity = .current,
         in modelContext: ModelContext
     ) -> AuditLogEntry {
+        // iOS exposes no account name, so entries from an iPhone or iPad carried no actor at all. The troop
+        // profile names the treasurer who owns this database; use that name when the system offers none.
+        var userIdentity = identity.userIdentity
+        if userIdentity.isEmpty {
+            var descriptor = FetchDescriptor<TroopProfileRecord>(sortBy: [SortDescriptor(\.modifiedAt, order: .reverse)])
+            descriptor.fetchLimit = 1
+            if let treasurer = (try? modelContext.fetch(descriptor))?.first?.treasurerName.trimmingCharacters(in: .whitespacesAndNewlines), !treasurer.isEmpty {
+                userIdentity = "\(treasurer) (troop profile)"
+            }
+        }
         let entry = AuditLogEntry(
             timestamp: timestamp,
             action: action,
@@ -65,10 +75,22 @@ enum AuditLogger {
             details: details,
             deviceName: identity.deviceName,
             operatingSystem: identity.operatingSystem,
-            userIdentity: identity.userIdentity
+            userIdentity: userIdentity
         )
         modelContext.insert(entry)
         return entry
+    }
+
+    /// Serializes audit entries so the log can be handed to a reviewer on its own, without a full backup.
+    static func csv(for entries: [AuditLogEntry]) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        let header = ["id", "timestamp", "action", "record_type", "record_id", "summary", "details", "device_name", "operating_system", "user_identity"]
+        let rows = entries.sorted { $0.timestamp < $1.timestamp }.map { entry in
+            [entry.id.uuidString.lowercased(), formatter.string(from: entry.timestamp), entry.actionRaw, entry.recordType, entry.recordID?.uuidString.lowercased() ?? "", entry.summary, entry.details, entry.deviceName, entry.operatingSystem, entry.userIdentity]
+        }
+        return ([header] + rows).map { $0.map(CSVFormatting.field).joined(separator: ",") }.joined(separator: "\r\n") + "\r\n"
     }
 
     /// Builds "Changed <field>: before → after" lines from two snapshots taken around an edit, so an audit
