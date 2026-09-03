@@ -74,6 +74,9 @@ struct PeopleListView: View {
                 || person.patrol.localizedCaseInsensitiveContains(searchText)
                 || (person.currentRank != .none && person.currentRank.displayName.localizedCaseInsensitiveContains(searchText))
                 || person.positionSummary.localizedCaseInsensitiveContains(searchText)
+                || person.scoutingMemberID.localizedCaseInsensitiveContains(searchText)
+                || person.email.localizedCaseInsensitiveContains(searchText)
+                || person.phone.localizedCaseInsensitiveContains(searchText)
         }
     }
 
@@ -153,7 +156,7 @@ struct PeopleListView: View {
                 .onDelete(perform: deletePeople)
             }
         }
-        .searchable(text: $searchText, prompt: "Name, patrol, rank, or position")
+        .searchable(text: $searchText, prompt: "Name, patrol, rank, position, member ID, email, or phone")
         .navigationDestination(for: PersonRecord.self) { PersonDetailView(person: $0) }
         .pageToolbar(title: "People") {
             Button("Add Person", systemImage: "plus") { showingNewPerson = true }
@@ -232,7 +235,14 @@ struct PeopleListView: View {
                 summary: "Deleted person \(person.displayName)",
                 details: AuditLogger.details([
                     ("Role", person.role.rawValue),
+                    ("Rank", person.role == .scout ? person.currentRank.displayName : nil),
+                    ("Positions", person.positionSummary),
+                    ("Patrol", person.patrol),
                     ("Scouting Member ID", person.scoutingMemberID),
+                    ("Email", person.email),
+                    ("Phone", person.phone),
+                    ("Active", person.isActive ? "Yes" : "No"),
+                    ("Notes", person.notes),
                 ]),
                 in: modelContext
             )

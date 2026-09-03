@@ -113,6 +113,12 @@ struct EventRosterView: View {
                             recordType: "Event Participant",
                             recordID: participant.id,
                             summary: "Removed \(participantDisplayName(participant)) from \(event.name)",
+                            details: AuditLogger.details([
+                                ("Status", participant.status.rawValue),
+                                ("Fee", Money.currency(cents: participant.feeCents)),
+                                ("Paid", Money.currency(cents: participant.paidCents)),
+                                ("Notes", participant.notes),
+                            ]),
                             in: modelContext
                         )
                         modelContext.delete(participant)

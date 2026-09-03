@@ -7,7 +7,7 @@ struct ReconciliationView: View {
     @Query(sort: \LedgerTransaction.date) private var transactions: [LedgerTransaction]
     @Query(sort: \ReconciliationRecord.statementDate, order: .reverse) private var reconciliations: [ReconciliationRecord]
     @State private var accountID: UUID?
-    @State private var statementDate = Date()
+    @State private var statementDate = ReconciliationView.endOfPreviousMonth()
     @State private var endingBalance = "0.00"
     @State private var selected = Set<UUID>()
     @State private var notes = ""
@@ -184,6 +184,12 @@ struct ReconciliationView: View {
     }
 
     private func accountName(_ id: UUID?) -> String { accounts.first(where: { $0.id == id })?.name ?? "Unknown account" }
+
+    /// Statements arrive after the month closes; defaulting to today produced partial-month reconciliations.
+    static func endOfPreviousMonth(relativeTo date: Date = Date(), calendar: Calendar = .current) -> Date {
+        let monthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: date)) ?? date
+        return calendar.date(byAdding: .day, value: -1, to: monthStart) ?? date
+    }
 
     private func moveStatementDatePastLock() {
         statementDate = PeriodLocking.firstUnlockedDate(

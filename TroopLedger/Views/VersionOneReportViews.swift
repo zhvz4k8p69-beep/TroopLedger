@@ -11,7 +11,8 @@ struct TreasurerReportCenterView: View {
     @Query private var reconciliations: [ReconciliationRecord]
     @Query private var budgets: [OperatingBudgetRecord]
     @Query private var budgetLines: [BudgetLineRecord]
-    @State private var selectedMonth = Date()
+    // The current month is still open; the report that gets presented is last month's.
+    @State private var selectedMonth = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
     @State private var pdfDocument: TreasurerReportPDFDocument?
     @State private var packageDocument: TroopLedgerPackageDocument?
     @State private var pdfFilename = "Treasurer Report.pdf"
@@ -135,7 +136,8 @@ struct TreasurerReportCenterView: View {
 struct AnnualAuditExportView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var transactions: [LedgerTransaction]
-    @State private var selectedYear = ReportingYearBasis.schoolYear.startingYear(containing: Date())
+    // An audit package covers a completed school year, not the one in progress.
+    @State private var selectedYear = ReportingYearBasis.schoolYear.startingYear(containing: Date()) - 1
     @State private var document: TroopLedgerPackageDocument?
     @State private var filename = "Annual Audit.troopledgeraudit"
     @State private var fingerprint = ""
@@ -213,6 +215,12 @@ struct RecharterForecastView: View {
     @State private var otherCost = "0.00"
     @State private var expectedCollections = "0.00"
 
+    /// Program years are free text on registrations; typing a year that matches none of them silently zeroes
+    /// the assessed-dues reference, so offer the years that exist.
+    private var programYears: [String] {
+        Array(Set(registrations.map { $0.programYear.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })).sorted(by: >)
+    }
+
     private var snapshot: RecharterForecastSnapshot? {
         guard let per = Money.cents(from: perPersonCost), let unit = Money.cents(from: unitCharterCost), let other = Money.cents(from: otherCost), let collections = Money.cents(from: expectedCollections) else { return nil }
         return RecharterForecastService.makeSnapshot(programYear: programYear, people: people, registrations: registrations, accounts: accounts, transactions: transactions, perPersonCostCents: per, unitCharterCostCents: unit, otherCostCents: other, expectedCollectionsCents: collections)
@@ -222,6 +230,11 @@ struct RecharterForecastView: View {
         Form {
             Section("Visible Assumptions") {
                 TextField("Program year", text: $programYear)
+                if !programYears.isEmpty {
+                    Menu("Use a registration year on file") {
+                        ForEach(programYears, id: \.self) { year in Button(year) { programYear = year } }
+                    }
+                }
                 LabeledContent("Active Scouts and leaders included", value: "\(people.filter { $0.isActive && ($0.role == .scout || $0.role == .leader) }.count)")
                 AmountField(title: "Registration cost per person", text: $perPersonCost)
                 AmountField(title: "Unit charter cost", text: $unitCharterCost)
@@ -247,6 +260,9 @@ struct RecharterForecastView: View {
             }
         }
         .pageHeader(title: "Recharter Cash Forecast")
+        .onAppear {
+            if !programYears.isEmpty, !programYears.contains(programYear), let newest = programYears.first { programYear = newest }
+        }
     }
 
     private func money(_ label: String, _ cents: Int64, emphasized: Bool = false) -> some View {

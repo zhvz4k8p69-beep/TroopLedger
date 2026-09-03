@@ -190,6 +190,17 @@ struct ReportsView: View {
                 }
             }
 
+            Section("Books Integrity") {
+                NavigationLink {
+                    DataIntegrityView()
+                } label: {
+                    Label("Check Record Links", systemImage: "checkmark.shield")
+                }
+                Text("Finds deposits, reimbursements, transfers, roster rows, and ledger entries that point at records which no longer exist, plus duplicate holding accounts and member IDs.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Data Portability") {
                 Button("Export Full Plaintext Backup", systemImage: "externaldrive.badge.plus") {
                     prepareBackup()
@@ -316,6 +327,52 @@ struct ReportsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
+        }
+    }
+}
+
+struct DataIntegrityView: View {
+    @Environment(\.modelContext) private var modelContext
+    @State private var issues: [DataIntegrityIssue] = []
+    @State private var checkedAt: Date?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        List {
+            Section {
+                if let checkedAt {
+                    LabeledContent("Checked", value: checkedAt.formatted(date: .abbreviated, time: .shortened))
+                    LabeledContent("Problems", value: String(issues.filter { $0.severity == .problem }.count))
+                    LabeledContent("Warnings", value: String(issues.filter { $0.severity == .warning }.count))
+                }
+                Button("Check Again", systemImage: "arrow.clockwise") { runCheck() }
+            }
+            if let errorMessage {
+                Section { Label(errorMessage, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red) }
+            } else if checkedAt != nil, issues.isEmpty {
+                Section { Label("Every record link resolves. No duplicate holding accounts or member IDs were found.", systemImage: "checkmark.circle").foregroundStyle(.green) }
+            } else {
+                ForEach(Array(Dictionary(grouping: issues, by: \.area).sorted { $0.key < $1.key }), id: \.key) { area, areaIssues in
+                    Section(area) {
+                        ForEach(areaIssues) { issue in
+                            Label(issue.message, systemImage: issue.severity == .problem ? "xmark.octagon.fill" : "exclamationmark.triangle")
+                                .foregroundStyle(issue.severity == .problem ? Color.red : Color.orange)
+                        }
+                    }
+                }
+            }
+        }
+        .pageHeader(title: "Books Integrity")
+        .task { runCheck() }
+    }
+
+    private func runCheck() {
+        do {
+            issues = try DataIntegrityService.check(in: modelContext)
+            checkedAt = Date()
+            errorMessage = nil
+        } catch {
+            errorMessage = "The check could not run: \(error.localizedDescription)"
         }
     }
 }

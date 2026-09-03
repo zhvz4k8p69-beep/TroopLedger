@@ -5,10 +5,15 @@ import UniformTypeIdentifiers
 struct ImportHubView: View {
     @State private var selection = ImportSource.scoutbook
 
+    /// The starting-workbook snapshot is only bundled in Debug builds.
+    private var availableSources: [ImportSource] {
+        ImportSource.allCases.filter { $0 != .startingWorkbook || Bundle.main.url(forResource: "TroopFinanceImport", withExtension: "json") != nil }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Picker("Import source", selection: $selection) {
-                ForEach(ImportSource.allCases) { source in Text(source.rawValue).tag(source) }
+                ForEach(availableSources) { source in Text(source.rawValue).tag(source) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -286,7 +291,8 @@ struct ScoutbookIntegrationView: View {
                 recordType: "Calendar Subscription",
                 recordID: subscription.id,
                 summary: "Added Scoutbook calendar \(subscription.name)",
-                details: "Subscription URL intentionally omitted from the audit log.",
+                // The full URL carries an access token and stays out of the log; the host still identifies the feed.
+                details: AuditLogger.details([("Feed host", url.host), ("Note", "Subscription URL intentionally omitted from the audit log.")]),
                 in: modelContext
             )
             try modelContext.save()

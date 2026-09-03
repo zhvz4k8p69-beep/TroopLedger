@@ -1,3 +1,5 @@
+import CloudKit
+import Security
 import SwiftUI
 import SwiftData
 
@@ -16,6 +18,7 @@ struct DashboardView: View {
     @State private var showingNewTransaction = false
     @State private var previousCloseTasksComplete: Int?
     @State private var showingCloseMilestone = false
+    @State private var cloudAccountMessage: String?
 
     private let onOpenSection: (AppSection) -> Void
 
@@ -117,6 +120,15 @@ struct DashboardView: View {
                 }
                 .padding(.bottom, 2)
 
+                if let cloudAccountMessage {
+                    Label(cloudAccountMessage, systemImage: "icloud.slash")
+                        .font(.footnote)
+                        .foregroundStyle(Color.fieldbookWarning)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.fieldbookWarning.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+                }
+
                 if accounts.isEmpty {
                     EmptyMessage(
                         title: "Set up the ledger",
@@ -160,6 +172,7 @@ struct DashboardView: View {
                 .disabled(accounts.isEmpty)
         }
         .sheet(isPresented: $showingNewTransaction) { TransactionFormView() }
+        .task { await checkCloudAccount() }
         .onAppear { previousCloseTasksComplete = closeTasksComplete }
         .onChange(of: closeTasksComplete) { _, newValue in
             if ScoutMotion.shouldCelebrateTransition(
@@ -399,6 +412,40 @@ struct DashboardView: View {
             }
         }
     }
+
+    /// Two devices silently diverge when iCloud is signed out or restricted; say so where the treasurer looks first.
+    private func checkCloudAccount() async {
+        // CloudKit raises an Objective-C exception when the container is not in the process entitlements
+        // (unsigned developer builds, the unit-test host). Only ask when the entitlement is verifiably present.
+        guard Self.hasCloudKitEntitlement else { return }
+        do {
+            let status = try await CKContainer(identifier: "iCloud.com.bettnet.TroopLedger").accountStatus()
+            switch status {
+            case .available: cloudAccountMessage = nil
+            case .noAccount: cloudAccountMessage = "No iCloud account is signed in on this device. Changes stay here and will not reach your other devices until you sign in."
+            case .restricted: cloudAccountMessage = "iCloud is restricted on this device, so changes will not sync to your other devices."
+            case .temporarilyUnavailable: cloudAccountMessage = "iCloud is temporarily unavailable. Changes will sync once it returns; avoid editing the same records on another device meanwhile."
+            case .couldNotDetermine: cloudAccountMessage = "iCloud status could not be determined. Check Settings before relying on sync between devices."
+            @unknown default: cloudAccountMessage = nil
+            }
+        } catch {
+            cloudAccountMessage = "iCloud status could not be checked: \(error.localizedDescription)"
+        }
+    }
+
+    private static let hasCloudKitEntitlement: Bool = {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return false }
+#if os(macOS)
+        let task = SecTaskCreateFromSelf(nil)
+        guard let task,
+              let value = SecTaskCopyValueForEntitlement(task, "com.apple.developer.icloud-container-identifiers" as CFString, nil) as? [String] else {
+            return false
+        }
+        return value.contains("iCloud.com.bettnet.TroopLedger")
+#else
+        return true
+#endif
+    }()
 
     private func summaryValue(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {

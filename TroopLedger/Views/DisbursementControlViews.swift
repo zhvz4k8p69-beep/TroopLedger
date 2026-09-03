@@ -220,10 +220,22 @@ struct TroopProfileSettingsView: View {
         savedFingerprint = currentFingerprint
     }
 
+    private func snapshot(_ profile: TroopProfileRecord) -> [(String, String)] {
+        [
+            ("Troop name", profile.troopName), ("Troop number", profile.troopNumber), ("Council", profile.council),
+            ("District", profile.district), ("Chartered organization", profile.charteredOrganization),
+            ("Mailing address", profile.mailingAddress), ("Unit email", profile.unitEmail), ("Unit phone", profile.unitPhone),
+            ("Website", profile.website), ("Treasurer", profile.treasurerName), ("Treasurer preferred name", profile.treasurerPreferredName),
+            ("Treasurer title", profile.treasurerTitle), ("Treasurer email", profile.treasurerEmail), ("Treasurer phone", profile.treasurerPhone),
+            ("Committee chair", profile.committeeChairName), ("Notes", profile.notes),
+        ]
+    }
+
     private func save(closeAfterSaving: Bool = false) {
         do {
             let profile = storedProfiles.first ?? TroopProfileRecord()
             let isNew = storedProfiles.isEmpty
+            let before = isNew ? nil : snapshot(profile)
             profile.troopName = clean(troopName)
             profile.troopNumber = clean(troopNumber)
             profile.council = clean(council)
@@ -253,11 +265,12 @@ struct TroopProfileSettingsView: View {
                 recordType: "Troop Profile",
                 recordID: profile.id,
                 summary: "Updated \(profile.formalName)",
+                // The treasurer name also names the audit actor on iOS, so a change must be traceable.
                 details: AuditLogger.details([
                     ("Council", profile.council),
                     ("District", profile.district),
                     ("Treasurer", profile.treasurerName),
-                ]),
+                ] + (before.map { AuditLogger.changes(from: $0, to: snapshot(profile)) } ?? [])),
                 in: modelContext
             )
             try modelContext.save()
@@ -482,10 +495,19 @@ struct DisbursementControlSettingsView: View {
         warnMissingHousehold = policy.warnMissingHousehold
     }
 
+    private func snapshot(_ settings: DisbursementControlSettings) -> [(String, String)] {
+        [
+            ("Enabled", String(settings.isEnabled)), ("Expect approver", String(settings.expectApprover)),
+            ("Expected signers", String(settings.expectedSignerCount)), ("Warn same person", String(settings.warnSamePerson)),
+            ("Warn same household", String(settings.warnSameHousehold)), ("Warn missing household", String(settings.warnMissingHousehold)),
+        ]
+    }
+
     private func save() {
         do {
             let settings = storedSettings.first ?? DisbursementControlSettings()
             let isNew = storedSettings.isEmpty
+            let before = isNew ? nil : snapshot(settings)
             settings.isEnabled = isEnabled
             settings.expectApprover = expectApprover
             settings.expectedSignerCount = min(max(expectedSignerCount, 0), 2)
@@ -506,7 +528,7 @@ struct DisbursementControlSettingsView: View {
                     ("Warn same person", String(warnSamePerson)),
                     ("Warn same household", String(warnSameHousehold)),
                     ("Warn missing household", String(warnMissingHousehold)),
-                ]),
+                ] + (before.map { AuditLogger.changes(from: $0, to: snapshot(settings)) } ?? [])),
                 in: modelContext
             )
             try modelContext.save()

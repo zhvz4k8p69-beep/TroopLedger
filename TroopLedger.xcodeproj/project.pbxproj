@@ -584,6 +584,7 @@
 		39E256E9ACD43210CC738CCE /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				EXCLUDED_SOURCE_FILE_NAMES = TroopFinanceImport.json;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Configuration/TroopLedger.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
@@ -774,6 +775,7 @@
 		CAE432D570429D977E9C4832 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				EXCLUDED_SOURCE_FILE_NAMES = TroopFinanceImport.json;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Configuration/TroopLedger-macOS.entitlements";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";

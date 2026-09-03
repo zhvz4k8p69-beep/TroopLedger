@@ -333,7 +333,14 @@ struct EventListView: View {
                 summary: "Deleted event \(event.name)",
                 details: AuditLogger.details([
                     ("Start", event.startDate.formatted(date: .numeric, time: event.isAllDay ? .omitted : .shortened)),
+                    ("End", event.endDate.formatted(date: .numeric, time: event.isAllDay ? .omitted : .shortened)),
+                    ("Classification", event.classification.rawValue),
                     ("Status", event.status.rawValue),
+                    ("Location", event.mapSearchQuery),
+                    ("Coordinator", event.coordinator),
+                    ("Budgeted income", Money.currency(cents: event.budgetIncomeCents)),
+                    ("Budgeted expenses", Money.currency(cents: event.budgetExpenseCents)),
+                    ("Notes", event.notes),
                 ]),
                 in: modelContext
             )
@@ -808,6 +815,12 @@ struct EventDetailView: View {
                 recordType: "Event Participant",
                 recordID: participant.id,
                 summary: "Removed \(participantName(participant)) from \(event.name)",
+                details: AuditLogger.details([
+                    ("Status", participant.status.rawValue),
+                    ("Fee", Money.currency(cents: participant.feeCents)),
+                    ("Paid", Money.currency(cents: participant.paidCents)),
+                    ("Notes", participant.notes),
+                ]),
                 in: modelContext
             )
             modelContext.delete(participant)

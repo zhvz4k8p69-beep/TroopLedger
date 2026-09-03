@@ -21,7 +21,7 @@ TroopLedger 1.0 is a SwiftUI finance system of record for one Scouting America t
 - Duplicate-safe event close-out with immutable roster allocations, actual per-participant cost, unpaid/refund-due totals, final variance, and optional final member-ledger adjustments
 - Calendar and list views for all events, with multi-day event coverage and approximate-date warnings
 - Editable multiline notes on every event detail screen
-- A verified, fingerprint-protected starting-data import for `Troop Finance_Spreadsheet 2019.xlsx`
+- A verified, fingerprint-protected starting-data import for `Troop Finance_Spreadsheet 2019.xlsx` (the snapshot contains the troop's real records, so it is bundled only in Debug builds; Release archives omit it and hide the Starting Workbook import)
 - Previewed CSV/TSV imports from Scoutbook Plus Quick Export for Scouts/Members, Leaders & Parents, and Payment Log data
 - General transaction-register CSV/TSV import with account selection, field mapping, a no-write preview, row-level exception review, locked-period validation, and exact-file duplicate protection
 - Duplicate protection for both complete Scoutbook export files and individual payment rows

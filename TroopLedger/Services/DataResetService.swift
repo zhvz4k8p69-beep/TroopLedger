@@ -114,6 +114,134 @@ enum DataResetService {
     }
 }
 
+struct DataIntegrityIssue: Identifiable, Equatable {
+    enum Severity: String { case problem = "Problem", warning = "Warning" }
+    let severity: Severity
+    let area: String
+    let message: String
+    var id: String { "\(area)|\(message)" }
+}
+
+/// Because records link by UUID rather than SwiftData relationships, a CloudKit merge, an interrupted save,
+/// or an older app version can leave dangling links that no screen surfaces. This walk finds them.
+@MainActor
+enum DataIntegrityService {
+    static func check(in context: ModelContext) throws -> [DataIntegrityIssue] {
+        let accounts = try context.fetch(FetchDescriptor<AccountRecord>())
+        let transactions = try context.fetch(FetchDescriptor<LedgerTransaction>())
+        let people = try context.fetch(FetchDescriptor<PersonRecord>())
+        let events = try context.fetch(FetchDescriptor<EventRecord>())
+        let requests = try context.fetch(FetchDescriptor<ReimbursementRequest>())
+        let entries = try context.fetch(FetchDescriptor<MemberLedgerEntry>())
+        let batches = try context.fetch(FetchDescriptor<DepositBatchRecord>())
+        let allocations = try context.fetch(FetchDescriptor<DepositAllocationRecord>())
+        let participants = try context.fetch(FetchDescriptor<EventParticipant>())
+        let registrations = try context.fetch(FetchDescriptor<RegistrationRecord>())
+        let closeouts = try context.fetch(FetchDescriptor<EventCloseoutRecord>())
+        return check(accounts: accounts, transactions: transactions, people: people, events: events, requests: requests, entries: entries, batches: batches, allocations: allocations, participants: participants, registrations: registrations, closeouts: closeouts)
+    }
+
+    nonisolated static func check(
+        accounts: [AccountRecord],
+        transactions: [LedgerTransaction],
+        people: [PersonRecord],
+        events: [EventRecord],
+        requests: [ReimbursementRequest],
+        entries: [MemberLedgerEntry],
+        batches: [DepositBatchRecord],
+        allocations: [DepositAllocationRecord],
+        participants: [EventParticipant],
+        registrations: [RegistrationRecord],
+        closeouts: [EventCloseoutRecord]
+    ) -> [DataIntegrityIssue] {
+        var issues: [DataIntegrityIssue] = []
+        let accountIDs = Set(accounts.map(\.id))
+        let transactionIDs = Set(transactions.map(\.id))
+        let personIDs = Set(people.map(\.id))
+        let eventIDs = Set(events.map(\.id))
+        let batchIDs = Set(batches.map(\.id))
+
+        let holding = accounts.filter { $0.kind == .undepositedFunds }
+        if holding.count > 1 {
+            issues.append(.init(severity: .problem, area: "Accounts", message: "\(holding.count) Undeposited Funds accounts exist; deposits expect exactly one. Merge or archive the extras."))
+        }
+        for transaction in transactions {
+            if let accountID = transaction.accountID, !accountIDs.contains(accountID) {
+                issues.append(.init(severity: .problem, area: "Transactions", message: "\(describe(transaction)) belongs to an account that no longer exists."))
+            }
+            if let personID = transaction.personID, !personIDs.contains(personID) {
+                issues.append(.init(severity: .warning, area: "Transactions", message: "\(describe(transaction)) is linked to a person that no longer exists."))
+            }
+            if let eventID = transaction.eventID, !eventIDs.contains(eventID) {
+                issues.append(.init(severity: .warning, area: "Transactions", message: "\(describe(transaction)) is linked to an event that no longer exists."))
+            }
+        }
+        let transferGroups = Dictionary(grouping: transactions.filter { $0.isTransfer && $0.transferGroupID != nil }, by: { $0.transferGroupID! })
+        for (_, legs) in transferGroups {
+            if legs.count != 2 {
+                issues.append(.init(severity: .problem, area: "Transfers", message: "Transfer \(legs.map(describe).joined(separator: " / ")) has \(legs.count) side\(legs.count == 1 ? "" : "s") instead of two."))
+            } else if legs[0].amountCents != legs[1].amountCents || legs[0].direction == legs[1].direction {
+                issues.append(.init(severity: .problem, area: "Transfers", message: "Transfer \(legs.map(describe).joined(separator: " / ")) does not balance."))
+            }
+        }
+        for request in requests {
+            if let linked = request.linkedTransactionID, !transactionIDs.contains(linked) {
+                issues.append(.init(severity: .problem, area: "Reimbursements", message: "\(request.purpose) (\(Money.currency(cents: request.amountCents))) points to a payment transaction that no longer exists."))
+            }
+            if request.status == .paid, request.linkedTransactionID == nil {
+                issues.append(.init(severity: .problem, area: "Reimbursements", message: "\(request.purpose) is marked paid without a linked payment."))
+            }
+            if let requester = request.requesterPersonID, !personIDs.contains(requester) {
+                issues.append(.init(severity: .warning, area: "Reimbursements", message: "\(request.purpose) names a requester that no longer exists."))
+            }
+        }
+        for entry in entries {
+            if let personID = entry.personID, !personIDs.contains(personID) {
+                issues.append(.init(severity: .problem, area: "Member ledger", message: "A \(entry.kind.rawValue.lowercased()) of \(Money.currency(cents: entry.amountCents)) dated \(entry.date.formatted(date: .numeric, time: .omitted)) belongs to a person that no longer exists."))
+            }
+            if let linked = entry.accountTransactionID, !transactionIDs.contains(linked) {
+                issues.append(.init(severity: .warning, area: "Member ledger", message: "A payment of \(Money.currency(cents: entry.amountCents)) dated \(entry.date.formatted(date: .numeric, time: .omitted)) points to a bank receipt that no longer exists."))
+            }
+        }
+        for batch in batches {
+            for (label, id) in [("holding", batch.holdingTransactionID), ("bank", batch.bankTransactionID)] where id.map({ !transactionIDs.contains($0) }) ?? true {
+                issues.append(.init(severity: .problem, area: "Deposits", message: "Deposit of \(Money.currency(cents: batch.totalCents)) on \(batch.depositDate.formatted(date: .numeric, time: .omitted)) is missing its \(label) transfer entry."))
+            }
+            let allocated = allocations.filter { $0.batchID == batch.id }.reduce(Int64(0)) { $0 + $1.amountCents }
+            if allocated != batch.totalCents {
+                issues.append(.init(severity: .problem, area: "Deposits", message: "Deposit of \(Money.currency(cents: batch.totalCents)) on \(batch.depositDate.formatted(date: .numeric, time: .omitted)) has allocations totaling \(Money.currency(cents: allocated))."))
+            }
+        }
+        for allocation in allocations where allocation.batchID.map({ !batchIDs.contains($0) }) ?? true {
+            issues.append(.init(severity: .warning, area: "Deposits", message: "An allocation of \(Money.currency(cents: allocation.amountCents)) for \(allocation.payerNameSnapshot) belongs to no deposit batch."))
+        }
+        for participant in participants {
+            if let eventID = participant.eventID, !eventIDs.contains(eventID) {
+                issues.append(.init(severity: .warning, area: "Events", message: "A roster row (paid \(Money.currency(cents: participant.paidCents))) belongs to an event that no longer exists."))
+            }
+            if let personID = participant.personID, !personIDs.contains(personID) {
+                issues.append(.init(severity: .warning, area: "Events", message: "A roster row belongs to a person that no longer exists."))
+            }
+        }
+        for registration in registrations where registration.personID.map({ !personIDs.contains($0) }) ?? true {
+            issues.append(.init(severity: .warning, area: "People", message: "A \(registration.programYear) registration belongs to a person that no longer exists."))
+        }
+        for event in events where event.closedAt != nil && !closeouts.contains(where: { $0.eventID == event.id }) {
+            issues.append(.init(severity: .problem, area: "Events", message: "\(event.name) is marked closed but has no close-out record."))
+        }
+        let duplicateIDs = Dictionary(grouping: people.filter { !$0.scoutingMemberID.trimmingCharacters(in: .whitespaces).isEmpty }, by: { $0.scoutingMemberID.trimmingCharacters(in: .whitespaces) })
+            .filter { $0.value.count > 1 }
+        for (memberID, matches) in duplicateIDs {
+            issues.append(.init(severity: .warning, area: "People", message: "Scouting Member ID \(memberID) is shared by \(matches.map(\.displayName).sorted().joined(separator: ", "))."))
+        }
+        return issues.sorted { ($0.severity == .problem ? 0 : 1, $0.area, $0.message) < ($1.severity == .problem ? 0 : 1, $1.area, $1.message) }
+    }
+
+    nonisolated private static func describe(_ transaction: LedgerTransaction) -> String {
+        "\(transaction.payee.isEmpty ? transaction.category : transaction.payee) \(Money.currency(cents: transaction.signedAmountCents)) on \(transaction.date.formatted(date: .numeric, time: .omitted))"
+    }
+}
+
 /// Centralizes UUID-reference checks for destructive list actions. TroopLedger intentionally uses UUID links
 /// instead of SwiftData relationships, so deletion must explicitly protect every referencing record type.
 enum RecordDeletionPolicy {

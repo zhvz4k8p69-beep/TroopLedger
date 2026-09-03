@@ -32,6 +32,10 @@ targets:
         INFOPLIST_FILE: Configuration/TroopLedger-iOS-Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
+      configs:
+        Release:
+          # The starting-workbook snapshot holds real names and transactions; ship it only in Debug builds.
+          EXCLUDED_SOURCE_FILE_NAMES: TroopFinanceImport.json
   TroopLedger-macOS:
     type: application
     platform: macOS
@@ -50,6 +54,9 @@ targets:
         INFOPLIST_FILE: Configuration/TroopLedger-macOS-Info.plist
         ENABLE_APP_SANDBOX: YES
         ENABLE_HARDENED_RUNTIME: YES
+      configs:
+        Release:
+          EXCLUDED_SOURCE_FILE_NAMES: TroopFinanceImport.json
   TroopLedgerTests:
     type: bundle.unit-test
     platform: macOS

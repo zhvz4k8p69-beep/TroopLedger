@@ -3313,4 +3313,126 @@ final class FinanceEngineTests: XCTestCase {
             XCTAssertFalse(String(describing: error).isEmpty)
         }
     }
+
+    // MARK: - Regression tests for the seventh audit round
+
+    func testMonthlyRulesHonorByMonthDayIncludingLastDay() throws {
+        let ics = """
+        BEGIN:VCALENDAR
+        BEGIN:VEVENT
+        UID:dues-1
+        DTSTART:20260901T090000Z
+        DTEND:20260901T093000Z
+        RRULE:FREQ=MONTHLY;BYMONTHDAY=1,15,-1;COUNT=6
+        SUMMARY:Dues Reminder
+        END:VEVENT
+        END:VCALENDAR
+        """
+        let events = try ScoutbookCalendarService.parse(data: Data(ics.utf8)).sorted { $0.startDate < $1.startDate }
+        XCTAssertEqual(events.count, 6)
+        let days = events.map { Calendar.current.component(.day, from: $0.startDate) }
+        XCTAssertEqual(days, [1, 15, 30, 1, 15, 31])
+    }
+
+    func testWindowsTimeZoneNamesResolveAndDateOnlyUntilIncludesItsDay() throws {
+        XCTAssertEqual(ScoutbookCalendarService.timeZone(forTZID: "Eastern Standard Time")?.identifier, "America/New_York")
+        XCTAssertEqual(ScoutbookCalendarService.timeZone(forTZID: "America/Chicago")?.identifier, "America/Chicago")
+        XCTAssertNil(ScoutbookCalendarService.timeZone(forTZID: "Nowhere Standard Time"))
+        let ics = """
+        BEGIN:VCALENDAR
+        BEGIN:VEVENT
+        UID:until-1
+        DTSTART;TZID=Eastern Standard Time:20260901T190000
+        DTEND;TZID=Eastern Standard Time:20260901T200000
+        RRULE:FREQ=WEEKLY;UNTIL=20260915
+        SUMMARY:Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """
+        let events = try ScoutbookCalendarService.parse(data: Data(ics.utf8))
+        XCTAssertEqual(events.count, 3, "the occurrence on the UNTIL day itself must be kept")
+        XCTAssertEqual(events.first?.startDate, Date(timeIntervalSince1970: 1_788_303_600))
+    }
+
+    func testBankFilesWithSummaryLinesSemicolonsAndEuropeanDecimalsParse() throws {
+        let csv = "Kontoauszug Musterbank\n\nSaldo;1.234,56\n\nDatum;Betrag;Beschreibung\n01.09.2026;-12,50;Zeltplatz\n02.09.2026;1.250,00;Spende\n"
+        let document = try GeneralSpreadsheetImporter.parse(data: Data(csv.utf8), sourceName: "auszug.csv")
+        XCTAssertEqual(document.headers, ["Datum", "Betrag", "Beschreibung"])
+        XCTAssertEqual(document.rows.count, 2)
+        XCTAssertEqual(document.rows.first?.id, 6)
+        let mapping = TransactionColumnMapping.detected(from: document.headers)
+        XCTAssertNil(mapping[.date], "a German date header is not auto-mapped, but the header row itself was found")
+        let usCSV = "Account Activity\nBeginning balance as of 09/01/2026,\"1,000.00\"\n\nDate,Description,Amount\n09/02/2026,Camp Store,-42.50\n"
+        let usDocument = try GeneralSpreadsheetImporter.parse(data: Data(usCSV.utf8), sourceName: "bofa.csv")
+        XCTAssertEqual(usDocument.headers, ["Date", "Description", "Amount"])
+        let preview = GeneralSpreadsheetImporter.preview(document: usDocument, mapping: TransactionColumnMapping.detected(from: usDocument.headers), accountID: UUID(), defaultDirection: .income, defaultCategory: "Dues", reconciliations: [])
+        XCTAssertEqual(preview.validRows.first?.draft?.amountCents, 4_250)
+        XCTAssertEqual(preview.validRows.first?.draft?.direction, .expense)
+    }
+
+    func testEuropeanDecimalCommaAmountsAreNotReadAsThousands() throws {
+        let csv = "Date,Amount\n9/1/2026,\"12,50\"\n9/1/2026,\"1.250,00\"\n9/1/2026,\"1,250.00\"\n"
+        let document = try GeneralSpreadsheetImporter.parse(data: Data(csv.utf8), sourceName: "mixed.csv")
+        let preview = GeneralSpreadsheetImporter.preview(document: document, mapping: TransactionColumnMapping.detected(from: document.headers), accountID: UUID(), defaultDirection: .income, defaultCategory: "Dues", reconciliations: [])
+        XCTAssertEqual(preview.validRows.compactMap { $0.draft?.amountCents }, [1_250, 125_000, 125_000])
+    }
+
+    func testIntegrityCheckFindsDanglingLinksAndDuplicates() {
+        let checking = AccountRecord(name: "Checking")
+        let undepositedA = AccountRecord(name: "UF A", kind: .undepositedFunds)
+        let undepositedB = AccountRecord(name: "UF B", kind: .undepositedFunds)
+        let orphanTransaction = LedgerTransaction(accountID: UUID(), date: Date(), direction: .expense, amountCents: 100, payee: "Ghost", category: "Supplies")
+        let lonelyLeg = LedgerTransaction(accountID: checking.id, date: Date(), direction: .expense, amountCents: 500, payee: "Transfer", category: "Account Transfer")
+        lonelyLeg.isTransfer = true
+        lonelyLeg.transferGroupID = UUID()
+        let paidWithoutLink = ReimbursementRequest(requesterPersonID: UUID(), purchaseDate: Date(), purpose: "Supplies", category: "Supplies", amountCents: 100)
+        paidWithoutLink.status = .paid
+        let first = PersonRecord(firstName: "A", lastName: "One", role: .scout); first.scoutingMemberID = "77"
+        let second = PersonRecord(firstName: "B", lastName: "Two", role: .scout); second.scoutingMemberID = "77"
+        let issues = DataIntegrityService.check(accounts: [checking, undepositedA, undepositedB], transactions: [orphanTransaction, lonelyLeg], people: [first, second], events: [], requests: [paidWithoutLink], entries: [], batches: [], allocations: [], participants: [], registrations: [], closeouts: [])
+        XCTAssertTrue(issues.contains { $0.area == "Accounts" && $0.message.contains("2 Undeposited Funds") })
+        XCTAssertTrue(issues.contains { $0.area == "Transactions" && $0.message.contains("no longer exists") })
+        XCTAssertTrue(issues.contains { $0.area == "Transfers" && $0.message.contains("1 side") })
+        XCTAssertTrue(issues.contains { $0.area == "Reimbursements" && $0.message.contains("without a linked payment") })
+        XCTAssertTrue(issues.contains { $0.area == "People" && $0.message.contains("77") })
+        XCTAssertEqual(issues.first?.severity, .problem)
+        XCTAssertTrue(DataIntegrityService.check(accounts: [checking], transactions: [], people: [], events: [], requests: [], entries: [], batches: [], allocations: [], participants: [], registrations: [], closeouts: []).isEmpty)
+    }
+
+    func testApprovalReportFlagsPaymentsAttributedToAnotherPerson() {
+        let requester = UUID()
+        let transaction = LedgerTransaction(accountID: UUID(), date: Date(), direction: .expense, amountCents: 1_000, payee: "Someone", category: "Supplies")
+        transaction.personID = UUID()
+        let request = ReimbursementRequest(requesterPersonID: requester, purchaseDate: Date().addingTimeInterval(-86_400), purpose: "Supplies", category: "Supplies", amountCents: 1_000)
+        request.status = .paid
+        request.reviewerName = "Sam"
+        request.reviewedAt = Date()
+        request.linkedTransactionID = transaction.id
+        let report = ReimbursementApprovalReportService.makeReport(requests: [request], attachments: [], transactions: [transaction], people: [], auditEntries: [], policy: DisbursementControlPolicy(isEnabled: false))
+        XCTAssertTrue(report.rows.first?.issues.contains { $0.message.contains("different person") } == true)
+    }
+
+    @MainActor
+    func testCalendarSyncResultNamesAddedAndRemovedEvents() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let subscription = ExternalCalendarSubscription(name: "Troop", feedURLString: "https://example.com/feed.ics")
+        let stale = EventRecord(name: "Old Meeting", startDate: Date(), endDate: Date())
+        stale.calendarSubscriptionID = subscription.id
+        stale.externalSourceID = "old"
+        context.insert(subscription); context.insert(stale)
+        try context.save()
+        let result = try ScoutbookCalendarService.apply(feedEvents: [ScoutbookCalendarEvent(externalID: "new", title: "New Campout", startDate: Date(), endDate: Date(), location: "", notes: "", isAllDay: true, modifiedAt: nil)], to: subscription, in: context)
+        XCTAssertEqual(result.insertedTitles.count, 1)
+        XCTAssertTrue(result.insertedTitles.first?.hasPrefix("New Campout") == true)
+        XCTAssertTrue(result.removedTitles.first?.hasPrefix("Old Meeting") == true)
+    }
+
+    func testReconciliationDefaultsToTheEndOfThePreviousMonth() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let today = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 9, day: 3, hour: 12)))
+        let expected = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 31)))
+        XCTAssertEqual(ReconciliationView.endOfPreviousMonth(relativeTo: today, calendar: calendar), expected)
+    }
 }

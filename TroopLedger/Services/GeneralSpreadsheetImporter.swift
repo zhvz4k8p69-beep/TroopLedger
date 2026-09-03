@@ -167,12 +167,14 @@ enum GeneralSpreadsheetImporter {
         guard let text = decode(data) else { throw GeneralSpreadsheetImportError.unreadableText }
         let delimiter = detectedDelimiter(in: text)
         let table = parseTable(text, delimiter: delimiter)
-        guard let rawHeaders = table.first, !rawHeaders.isEmpty else { throw GeneralSpreadsheetImportError.emptyFile }
+        let headerIndex = headerRowIndex(in: table)
+        guard headerIndex < table.count, !table[headerIndex].isEmpty else { throw GeneralSpreadsheetImportError.emptyFile }
+        let rawHeaders = table[headerIndex]
 
         let headers = disambiguatedHeaders(rawHeaders)
-        let rows = table.dropFirst().enumerated().compactMap { offset, cells -> GeneralSpreadsheetRow? in
+        let rows = table.dropFirst(headerIndex + 1).enumerated().compactMap { offset, cells -> GeneralSpreadsheetRow? in
             guard cells.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return nil }
-            return GeneralSpreadsheetRow(id: offset + 2, cells: cells)
+            return GeneralSpreadsheetRow(id: offset + headerIndex + 2, cells: cells)
         }
         guard !rows.isEmpty else { throw GeneralSpreadsheetImportError.emptyFile }
         guard rows.count <= maximumRows else { throw GeneralSpreadsheetImportError.tooManyRows }
@@ -512,7 +514,7 @@ enum GeneralSpreadsheetImporter {
         let debitSuffix = uppercased.hasSuffix("DR") || uppercased.hasSuffix(" DB")
         cleaned = cleaned
             .replacingOccurrences(of: "$", with: "")
-            .replacingOccurrences(of: ",", with: "")
+            .replacingOccurrences(of: "€", with: "")
             .replacingOccurrences(of: "(", with: "")
             .replacingOccurrences(of: ")", with: "")
             .replacingOccurrences(of: "+", with: "")
@@ -520,6 +522,16 @@ enum GeneralSpreadsheetImporter {
         for suffix in ["CR", "DR", "DB", "cr", "dr", "db", "-"] where cleaned.hasSuffix(suffix) {
             cleaned = String(cleaned.dropLast(suffix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        // "12,50" in a European export is twelve euros fifty, not twelve hundred and fifty: a comma followed by
+        // exactly two digits with no later period is the decimal separator.
+        if let lastComma = cleaned.lastIndex(of: ","),
+           cleaned.distance(from: cleaned.index(after: lastComma), to: cleaned.endIndex) == 2,
+           cleaned[cleaned.index(after: lastComma)...].allSatisfy(\.isNumber),
+           cleaned.lastIndex(of: ".").map({ $0 < lastComma }) ?? true {
+            cleaned = cleaned.replacingOccurrences(of: ".", with: "")
+            cleaned = cleaned.replacingOccurrences(of: ",", with: ".")
+        }
+        cleaned = cleaned.replacingOccurrences(of: ",", with: "")
         guard var decimal = Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX")) else { return nil }
         if parenthesized || trailingMinus || debitSuffix { decimal = -abs(decimal) }
         var scaled = decimal * 100
@@ -537,29 +549,32 @@ enum GeneralSpreadsheetImporter {
         return String(data: data, encoding: .isoLatin1)
     }
 
-    /// Counts separators in the first logical record, ignoring delimiters embedded in quoted fields.
-    private static func detectedDelimiter(in text: String) -> Character {
-        var commaCount = 0
-        var tabCount = 0
-        var quoted = false
-        var index = text.startIndex
-        while index < text.endIndex {
-            let character = text[index]
-            if character == "\"" {
-                let next = text.index(after: index)
-                if quoted, next < text.endIndex, text[next] == "\"" {
-                    index = next
-                } else {
-                    quoted.toggle()
-                }
-            } else if !quoted {
-                if character == "," { commaCount += 1 }
-                else if character == "\t" { tabCount += 1 }
-                else if character == "\n" || character == "\r" { break }
-            }
-            index = text.index(after: index)
+    /// Bank exports often open with summary lines ("Beginning balance as of ...") before the real header.
+    /// The header is the first row whose cells include a recognizable date column; otherwise the first row.
+    static func headerRowIndex(in table: [[String]]) -> Int {
+        let dateNames: Set<String> = ["date", "transactiondate", "posteddate", "postingdate", "entrydate", "datum"]
+        for (index, row) in table.prefix(25).enumerated() {
+            let cells = row.map(normalizeHeader)
+            if cells.contains(where: dateNames.contains), cells.filter({ !$0.isEmpty }).count >= 2 { return index }
         }
-        return tabCount > commaCount ? "\t" : ","
+        return table.firstIndex { row in row.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count >= 2 } ?? 0
+    }
+
+    /// Picks the separator (comma, tab, or semicolon) that appears most on any of the first lines, counted
+    /// outside quoted fields, so title lines without separators and European semicolon files both work.
+    private static func detectedDelimiter(in text: String) -> Character {
+        var best: (Character, Int) = (",", 0)
+        for line in text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r" }).prefix(25) {
+            var counts: [Character: Int] = [",": 0, "\t": 0, ";": 0]
+            var quoted = false
+            for character in line {
+                if character == "\"" { quoted.toggle(); continue }
+                guard !quoted, counts[character] != nil else { continue }
+                counts[character, default: 0] += 1
+            }
+            for (delimiter, count) in counts where count > best.1 { best = (delimiter, count) }
+        }
+        return best.0
     }
 
     private static func disambiguatedHeaders(_ rawHeaders: [String]) -> [String] {

@@ -27,7 +27,9 @@ struct TransactionListView: View {
             $0.memo.localizedCaseInsensitiveContains(searchText) ||
             $0.category.localizedCaseInsensitiveContains(searchText) ||
             $0.checkNumber.localizedCaseInsensitiveContains(searchText) ||
-            $0.adjustmentReason.localizedCaseInsensitiveContains(searchText)
+            $0.adjustmentReason.localizedCaseInsensitiveContains(searchText) ||
+            Money.editableString(cents: $0.amountCents).contains(searchText) ||
+            Money.currency(cents: $0.amountCents).contains(searchText)
         }
     }
 
@@ -472,9 +474,17 @@ struct TransactionListView: View {
             recordID: transaction.id,
             summary: "Deleted transaction \(transaction.payee.isEmpty ? transaction.category : transaction.payee)",
             details: AuditLogger.details([
+                ("Account", accountName(transaction.accountID)),
                 ("Date", transaction.date.formatted(date: .numeric, time: .omitted)),
+                ("Type", transaction.direction.rawValue),
                 ("Amount", Money.currency(cents: transaction.signedAmountCents)),
+                ("Payee", transaction.payee),
                 ("Category", transaction.category),
+                ("Check / reference", transaction.checkNumber),
+                ("Memo", transaction.memo),
+                ("Cleared", transaction.isCleared ? "Yes" : "No"),
+                ("Person ID", transaction.personID?.uuidString),
+                ("Event ID", transaction.eventID?.uuidString),
             ]),
             in: modelContext
         )

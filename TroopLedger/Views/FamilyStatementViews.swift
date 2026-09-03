@@ -118,7 +118,10 @@ struct FamilyStatementListView: View {
             recordType: "Family",
             recordID: family.id,
             summary: "Deleted family \(family.name)",
-            details: AuditLogger.details([("Members unassigned", String(assigned.count))]),
+            details: AuditLogger.details([
+                ("Members unassigned", assigned.map(\.displayName).sorted().joined(separator: ", ")),
+                ("Notes", family.notes),
+            ]),
             in: modelContext
         )
         modelContext.delete(family)

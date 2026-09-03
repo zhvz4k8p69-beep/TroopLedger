@@ -20,6 +20,9 @@ struct CalendarSyncResult: Sendable {
     let removed: Int
     let detached: Int
     let eventCount: Int
+    var insertedTitles: [String] = []
+    var removedTitles: [String] = []
+    var detachedTitles: [String] = []
 }
 
 enum ScoutbookCalendarError: LocalizedError, Equatable {
@@ -227,6 +230,10 @@ enum ScoutbookCalendarService {
                     ("Updated", String(result.updated)),
                     ("Removed", String(result.removed)),
                     ("Preserved with local data", String(result.detached)),
+                    // Counts alone cannot show which events a sync added or took away.
+                    ("Added events", result.insertedTitles.prefix(50).joined(separator: "\n")),
+                    ("Removed events", result.removedTitles.prefix(50).joined(separator: "\n")),
+                    ("Detached events", result.detachedTitles.prefix(50).joined(separator: "\n")),
                 ]),
                 in: modelContext
             )
@@ -265,6 +272,9 @@ enum ScoutbookCalendarService {
 
         var inserted = 0
         var updated = 0
+        var insertedTitles: [String] = []
+        var removedTitles: [String] = []
+        var detachedTitles: [String] = []
         let receivedIDs = Set(feedEvents.map(\.externalID))
         for source in feedEvents {
             let event: EventRecord
@@ -276,6 +286,7 @@ enum ScoutbookCalendarService {
                 modelContext.insert(event)
                 byExternalID[source.externalID] = event
                 inserted += 1
+                insertedTitles.append("\(source.title) (\(source.startDate.formatted(date: .numeric, time: .omitted)))")
             }
             // A detached event may carry notes the treasurer typed; do not blank them when the feed has none.
             let wasDetached = event.calendarSubscriptionID == nil
@@ -299,13 +310,16 @@ enum ScoutbookCalendarService {
         var removed = 0
         var detached = 0
         for event in subscribedEvents where !receivedIDs.contains(event.externalSourceID) {
+            let label = "\(event.name) (\(event.startDate.formatted(date: .numeric, time: .omitted)))"
             if canDelete(event, dependencies: dependencies) {
                 modelContext.delete(event)
                 removed += 1
+                removedTitles.append(label)
             } else {
                 event.calendarSubscriptionID = nil
                 event.isReadOnly = false
                 detached += 1
+                detachedTitles.append(label)
             }
         }
 
@@ -314,7 +328,10 @@ enum ScoutbookCalendarService {
             updated: updated,
             removed: removed,
             detached: detached,
-            eventCount: feedEvents.count
+            eventCount: feedEvents.count,
+            insertedTitles: insertedTitles,
+            removedTitles: removedTitles,
+            detachedTitles: detachedTitles
         )
     }
 
@@ -401,9 +418,26 @@ enum ScoutbookCalendarService {
         return result
     }
 
+    /// Feeds produced by Outlook/Exchange label times with Windows zone names, which Foundation does not know.
+    /// Falling back to the local zone shifted every meeting for a troop whose feed came from another region.
+    static let windowsTimeZones: [String: String] = [
+        "Eastern Standard Time": "America/New_York", "Central Standard Time": "America/Chicago",
+        "Mountain Standard Time": "America/Denver", "US Mountain Standard Time": "America/Phoenix",
+        "Pacific Standard Time": "America/Los_Angeles", "Alaskan Standard Time": "America/Anchorage",
+        "Hawaiian Standard Time": "Pacific/Honolulu", "Atlantic Standard Time": "America/Halifax",
+        "Newfoundland Standard Time": "America/St_Johns", "GMT Standard Time": "Europe/London",
+        "W. Europe Standard Time": "Europe/Berlin", "Central Europe Standard Time": "Europe/Budapest",
+        "Romance Standard Time": "Europe/Paris", "UTC": "UTC", "Coordinated Universal Time": "UTC",
+    ]
+
+    static func timeZone(forTZID identifier: String) -> TimeZone? {
+        let trimmed = identifier.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\"/"))
+        return TimeZone(identifier: trimmed) ?? windowsTimeZones[trimmed].flatMap(TimeZone.init(identifier:))
+    }
+
     private static func parseDate(_ value: String, parameters: [String: String]) -> (date: Date, isDateOnly: Bool)? {
         let isDateOnly = parameters["VALUE"]?.uppercased() == "DATE" || (value.count == 8 && !value.contains("T"))
-        let timeZone = parameters["TZID"].flatMap(TimeZone.init(identifier:)) ?? .current
+        let timeZone = parameters["TZID"].flatMap(timeZone(forTZID:)) ?? .current
         let formats = isDateOnly
             ? ["yyyyMMdd"]
             : value.hasSuffix("Z") ? ["yyyyMMdd'T'HHmmss'Z'", "yyyyMMdd'T'HHmm'Z'"] : ["yyyyMMdd'T'HHmmss", "yyyyMMdd'T'HHmm"]
@@ -487,7 +521,12 @@ enum ScoutbookCalendarService {
         guard let frequency = values["FREQ"]?.uppercased() else { return [event] }
         let interval = max(1, Int(values["INTERVAL"] ?? "1") ?? 1)
         let count = min(500, max(1, Int(values["COUNT"] ?? "500") ?? 500))
-        let until = values["UNTIL"].flatMap { parseDate($0, parameters: [:])?.date }
+        // A date-only UNTIL covers its whole day; treating it as midnight dropped the final occurrence.
+        let until: Date? = values["UNTIL"].flatMap { value in
+            guard let parsed = parseDate(value, parameters: [:]) else { return nil }
+            guard parsed.isDateOnly, let nextDay = Calendar.current.date(byAdding: .day, value: 1, to: parsed.date) else { return parsed.date }
+            return nextDay.addingTimeInterval(-1)
+        }
         let horizon = Calendar.current.date(byAdding: .year, value: 2, to: Date()) ?? Date().addingTimeInterval(63_072_000)
         let component: Calendar.Component
         switch frequency {
@@ -528,10 +567,38 @@ enum ScoutbookCalendarService {
                 return ["SU": 1, "MO": 2, "TU": 3, "WE": 4, "TH": 5, "FR": 6, "SA": 7][code]
             }
             : []
+        // MONTHLY rules such as "the 1st and 15th" or "the last day" (BYMONTHDAY=-1).
+        let byMonthDays: [Int] = frequency == "MONTHLY"
+            ? (values["BYMONTHDAY"] ?? "").split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }.filter { $0 != 0 && abs($0) <= 31 }
+            : []
         func candidates() -> [Date] {
             var dates: [Date] = []
             // COUNT sizes the recurrence set before EXDATE removes members from it, so generate exactly
             // COUNT candidates and let the exclusions thin them out afterwards.
+            if !byMonthDays.isEmpty {
+                var month = 0
+                let timeParts = calendar.dateComponents([.hour, .minute, .second], from: event.startDate)
+                while dates.count < count, month < 1_200 {
+                    guard let monthStart = calendar.date(byAdding: .month, value: month * interval, to: calendar.date(from: calendar.dateComponents([.year, .month], from: event.startDate)) ?? event.startDate),
+                          let dayRange = calendar.range(of: .day, in: .month, for: monthStart) else { break }
+                    var inMonth: [Date] = []
+                    for requested in byMonthDays {
+                        let day = requested > 0 ? requested : dayRange.count + 1 + requested
+                        guard dayRange.contains(day) else { continue }
+                        var components = calendar.dateComponents([.year, .month], from: monthStart)
+                        components.day = day
+                        components.hour = timeParts.hour
+                        components.minute = timeParts.minute
+                        components.second = timeParts.second
+                        if let date = calendar.date(from: components), date >= event.startDate { inMonth.append(date) }
+                    }
+                    let sorted = inMonth.sorted()
+                    if let first = sorted.first, first > horizon || (until.map { first > $0 } ?? false) { break }
+                    dates.append(contentsOf: sorted.filter { date in date <= horizon && (until.map { date <= $0 } ?? true) })
+                    month += 1
+                }
+                return Array(dates.prefix(count))
+            }
             if byDays.isEmpty {
                 var index = 0
                 while dates.count < count {

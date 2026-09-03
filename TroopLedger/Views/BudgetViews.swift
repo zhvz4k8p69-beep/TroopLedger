@@ -507,10 +507,15 @@ private struct CategoryFormView: View {
         .frame(minWidth: 440, minHeight: 450)
     }
 
+    private func snapshot(_ record: LedgerCategoryRecord) -> [(String, String)] {
+        [("Name", record.name), ("Type", record.direction.rawValue), ("Active", record.isActive ? "Yes" : "No"), ("Notes", record.notes)]
+    }
+
     private func save() {
         guard canSave else { return }
         let record = category ?? LedgerCategoryRecord(name: trimmedName, direction: direction)
         let isNew = category == nil
+        let before = category.map(snapshot)
         record.name = trimmedName
         record.direction = direction
         record.isActive = isActive
@@ -522,7 +527,7 @@ private struct CategoryFormView: View {
             recordType: "Ledger Category",
             recordID: record.id,
             summary: "\(isNew ? "Created" : "Edited") \(record.direction.rawValue.lowercased()) category \(record.name)",
-            details: AuditLogger.details([("Active", record.isActive ? "Yes" : "No")]),
+            details: AuditLogger.details([("Active", record.isActive ? "Yes" : "No")] + (before.map { AuditLogger.changes(from: $0, to: snapshot(record)) } ?? [])),
             in: modelContext
         )
         do {
