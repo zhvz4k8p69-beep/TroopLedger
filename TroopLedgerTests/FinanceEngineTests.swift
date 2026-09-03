@@ -2580,4 +2580,121 @@ final class FinanceEngineTests: XCTestCase {
         XCTAssertEqual(CommitteeReportPackageService.defaultFilename(for: report, calendar: calendar), "TroopLedger Committee Snapshot 2026-09-30.troopledgercommittee")
         XCTAssertEqual(TreasurerReportService.defaultMonthlyFilename(for: report, calendar: calendar), "TroopLedger Treasurer Report 2026-09.pdf")
     }
+
+    // MARK: - Regression tests for the second audit round
+
+    func testMoneyAcceptsCurrencySymbolsAndRejectsAbsurdAmounts() {
+        XCTAssertEqual(Money.cents(from: "$1,250.00"), 125_000)
+        XCTAssertEqual(Money.cents(from: " $ 12.5 "), 1_250)
+        XCTAssertNil(Money.cents(from: "999999999999.00"))
+        XCTAssertNil(Money.cents(from: "92233720368547758.07"))
+    }
+
+    func testCalendarOverrideWinsRegardlessOfFeedOrder() throws {
+        let ics = """
+        BEGIN:VCALENDAR
+        BEGIN:VEVENT
+        UID:series-1
+        RECURRENCE-ID:20260922T190000Z
+        DTSTART:20260922T200000Z
+        DTEND:20260922T210000Z
+        SUMMARY:Moved Meeting
+        END:VEVENT
+        BEGIN:VEVENT
+        UID:series-1
+        DTSTART:20260915T190000Z
+        DTEND:20260915T203000Z
+        RRULE:FREQ=WEEKLY;COUNT=2
+        SUMMARY:Troop Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """
+        let events = try ScoutbookCalendarService.parse(data: Data(ics.utf8))
+        XCTAssertEqual(events.count, 2)
+        let moved = try XCTUnwrap(events.first { $0.title == "Moved Meeting" })
+        XCTAssertEqual(moved.startDate, Date(timeIntervalSince1970: 1_790_107_200))
+        XCTAssertEqual(events.filter { $0.title == "Troop Meeting" }.count, 1)
+    }
+
+    func testCalendarURLRejectsEmbeddedCredentials() {
+        XCTAssertThrowsError(try ScoutbookCalendarService.validatedURL("https://scout:secret@example.com/feed.ics")) { error in
+            XCTAssertEqual(error as? ScoutbookCalendarError, .embeddedCredentials)
+        }
+        XCTAssertNoThrow(try ScoutbookCalendarService.validatedURL("https://example.com/feed.ics?token=abc"))
+    }
+
+    func testCalendarParserCapsTextLengths() throws {
+        let longNotes = String(repeating: "x", count: ScoutbookCalendarService.maximumNotesLength + 5_000)
+        let ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:long-1\nDTSTART:20260915T190000\nSUMMARY:Meeting\nDESCRIPTION:\(longNotes)\nEND:VEVENT\nEND:VCALENDAR\n"
+        let event = try XCTUnwrap(ScoutbookCalendarService.parse(data: Data(ics.utf8)).first)
+        XCTAssertEqual(event.notes.count, ScoutbookCalendarService.maximumNotesLength)
+    }
+
+    @MainActor
+    func testCalendarSyncReattachesDetachedEventsInsteadOfDuplicating() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let subscription = ExternalCalendarSubscription(name: "Troop", feedURLString: "https://example.com/feed.ics")
+        context.insert(subscription)
+        let detached = EventRecord(name: "Old Campout", startDate: Date(), endDate: Date())
+        detached.sourceSystem = "Scoutbook Calendar"
+        detached.externalSourceID = "camp-1"
+        detached.calendarSubscriptionID = nil
+        detached.isReadOnly = false
+        context.insert(detached)
+        try context.save()
+
+        let feed = [ScoutbookCalendarEvent(externalID: "camp-1", title: "Fall Campout", startDate: Date(), endDate: Date(), location: "", notes: "", isAllDay: true, modifiedAt: nil)]
+        let result = try ScoutbookCalendarService.apply(feedEvents: feed, to: subscription, in: context)
+        XCTAssertEqual(result.inserted, 0)
+        XCTAssertEqual(result.updated, 1)
+        let events = try context.fetch(FetchDescriptor<EventRecord>())
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.calendarSubscriptionID, subscription.id)
+        XCTAssertEqual(events.first?.name, "Fall Campout")
+    }
+
+    func testReconciliationRejectsFutureStatementDate() {
+        let account = AccountRecord(name: "Checking")
+        XCTAssertThrowsError(try ReconciliationCompletionPolicy.validate(
+            account: account,
+            statementDate: Date().addingTimeInterval(3 * 86_400),
+            statementBalanceCents: 0,
+            clearedBalanceCents: 0,
+            selectedTransactionIDs: [],
+            transactions: [],
+            reconciliations: []
+        )) { error in
+            XCTAssertEqual(error as? ReconciliationCompletionError, .statementDateInFuture)
+        }
+    }
+
+    @MainActor
+    func testWorkbookImportDetectsRecordsAlreadySyncedFromAnotherDevice() throws {
+        let snapshot = try SpreadsheetImporter.loadBundledSnapshot()
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let synced = PersonRecord(firstName: "Synced", lastName: "Elsewhere", role: .scout)
+        synced.id = try XCTUnwrap(snapshot.people.first?.id)
+        context.insert(synced)
+        try context.save()
+        XCTAssertThrowsError(try SpreadsheetImporter.importSnapshot(snapshot, into: context)) { error in
+            XCTAssertEqual(error as? SpreadsheetImportError, .alreadyImported)
+        }
+        XCTAssertEqual(try context.fetch(FetchDescriptor<AccountRecord>()).count, 0)
+    }
+
+    func testScoutbookParserAcceptsBareCarriageReturnLineEndings() throws {
+        let document = try ScoutbookImporter.parse(data: Data("First Name,Last Name\rAva,Scout\rBen,Scout\r".utf8), sourceName: "members.csv")
+        XCTAssertEqual(document.rows.count, 2)
+        XCTAssertEqual(document.rows.last?.value(["First Name"]), "Ben")
+    }
+
+    func testImportersCapCellLength() throws {
+        let memo = String(repeating: "m", count: GeneralSpreadsheetImporter.maximumCellLength * 2)
+        let document = try GeneralSpreadsheetImporter.parse(data: Data("Date,Amount,Memo\n8/30/2026,25.00,\(memo)\n".utf8), sourceName: "register.csv")
+        XCTAssertEqual(document.rows.first?.cells[2].count, GeneralSpreadsheetImporter.maximumCellLength)
+        let scoutbook = try ScoutbookImporter.parse(data: Data("First Name,Last Name,Notes\nAva,Scout,\(memo)\n".utf8), sourceName: "members.csv")
+        XCTAssertEqual(scoutbook.rows.first?.value(["Notes"]).count, ScoutbookImporter.maximumCellLength)
+    }
 }

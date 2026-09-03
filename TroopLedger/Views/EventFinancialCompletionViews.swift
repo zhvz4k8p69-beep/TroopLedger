@@ -103,7 +103,11 @@ struct EventFeePlannerView: View {
         event.feeCalculatorContingencyBasisPoints = calculation.contingencyBasisPoints
         event.feeCalculatorSuggestedFeeCents = calculation.suggestedFeeCents
         AuditLogger.record(.edit, recordType: "Event Fee Plan", recordID: event.id, summary: "Updated fee plan for \(event.name)", details: AuditLogger.details([("Expected participants", String(calculation.expectedParticipants)), ("Planned cost", Money.currency(cents: calculation.totalCostCents)), ("Suggested fee", Money.currency(cents: calculation.suggestedFeeCents))]), in: modelContext)
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            message = "The fee plan could not be saved: \(error.localizedDescription)"
+        }
     }
 
     private func deleteSchedules(at offsets: IndexSet) {

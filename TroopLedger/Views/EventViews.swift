@@ -498,6 +498,9 @@ struct EventDetailView: View {
     @State private var showingEdit = false
     @State private var showingParticipantPicker = false
     @State private var participantToEdit: EventParticipant?
+    @State private var notesDraft = ""
+    @State private var notesError: String?
+    @FocusState private var notesFocused: Bool
 
     private var transactions: [LedgerTransaction] { allTransactions.filter { $0.eventID == event.id } }
     private var eventEntries: [EventFinancialEntry] { allEventEntries.filter { $0.eventID == event.id } }
@@ -576,18 +579,21 @@ struct EventDetailView: View {
                     }
                 } else {
                     ZStack(alignment: .topLeading) {
-                        if event.notes.isEmpty {
+                        if notesDraft.isEmpty {
                             Text("Add planning notes, contacts, logistics, or follow-up details…")
                                 .foregroundStyle(.tertiary)
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 8)
                         }
-                        TextEditor(text: Binding(
-                            get: { event.notes },
-                            set: { event.notes = $0 }
-                        ))
-                        .frame(minHeight: 130)
-                        .scrollContentBackground(.hidden)
+                        // Edits accumulate in a draft and are committed (and audited) when the editor loses
+                        // focus or the screen closes, instead of rewriting the record on every keystroke.
+                        TextEditor(text: $notesDraft)
+                            .focused($notesFocused)
+                            .frame(minHeight: 130)
+                            .scrollContentBackground(.hidden)
+                    }
+                    if let notesError {
+                        Label(notesError, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red)
                     }
                 }
             }
@@ -700,6 +706,37 @@ struct EventDetailView: View {
         .sheet(isPresented: $showingEdit) { EventFormView(event: event) }
         .sheet(isPresented: $showingParticipantPicker) { EventRosterBuilderView(event: event) }
         .sheet(item: $participantToEdit) { EventParticipantFormView(event: event, participant: $0) }
+        .onAppear { notesDraft = event.notes }
+        .onChange(of: event.notes) { _, newValue in if !notesFocused { notesDraft = newValue } }
+        .onChange(of: notesFocused) { _, focused in if !focused { commitNotes() } }
+        .onDisappear { commitNotes() }
+    }
+
+    private func commitNotes() {
+        guard notesDraft != event.notes else { return }
+        guard EventMutationPolicy.canEdit(event) else {
+            notesDraft = event.notes
+            return
+        }
+        let previous = event.notes
+        event.notes = notesDraft
+        AuditLogger.record(
+            .edit,
+            recordType: "Event",
+            recordID: event.id,
+            summary: "Edited notes for \(event.name)",
+            details: AuditLogger.details([
+                ("Previous notes", previous),
+                ("New notes", event.notes),
+            ]),
+            in: modelContext
+        )
+        do {
+            try modelContext.save()
+            notesError = nil
+        } catch {
+            notesError = "Notes could not be saved: \(error.localizedDescription)"
+        }
     }
 
     private var formattedStart: String {
@@ -841,6 +878,11 @@ struct EventFormView: View {
             }
             .formStyle(.grouped)
             .navigationTitle(event == nil ? "New Event" : "Edit Event")
+            // The Ends picker only constrains its own display; moving Starts past Ends used to disable Save
+            // with no explanation.
+            .onChange(of: startDate) { _, newStart in
+                if endDate < newStart { endDate = newStart }
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(!canSave) }

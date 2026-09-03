@@ -791,8 +791,38 @@ private struct TransactionEditorView: View {
         preparedAdjustmentDate = true
     }
 
+    /// Fields captured before an edit so the audit entry can show what changed, not only the final values.
+    private struct TransactionSnapshot {
+        let values: [(String, String)]
+
+        init(_ record: LedgerTransaction, accountName: (UUID?) -> String) {
+            values = [
+                ("Account", accountName(record.accountID)),
+                ("Date", record.date.formatted(date: .numeric, time: .omitted)),
+                ("Type", record.direction.rawValue),
+                ("Amount", Money.currency(cents: record.amountCents)),
+                ("Check / reference", record.checkNumber),
+                ("Payee", record.payee),
+                ("Category", record.category),
+                ("Memo", record.memo),
+                ("Person ID", record.personID?.uuidString ?? ""),
+                ("Event ID", record.eventID?.uuidString ?? ""),
+                ("Cleared", record.isCleared ? "Yes" : "No"),
+                ("Adjustment reason", record.adjustmentReason),
+            ]
+        }
+
+        func changes(to other: TransactionSnapshot) -> [(String, String?)] {
+            zip(values, other.values).compactMap { before, after in
+                before.1 == after.1 ? nil : ("Changed \(before.0)", "\(before.1.isEmpty ? "(empty)" : before.1) → \(after.1.isEmpty ? "(empty)" : after.1)")
+            }
+        }
+    }
+
     private func save() {
         guard canSave, let cents = Money.cents(from: amount), cents > 0 else { return }
+        let accountName: (UUID?) -> String = { id in accounts.first { $0.id == id }?.name ?? "No account" }
+        let before = transaction.map { TransactionSnapshot($0, accountName: accountName) }
         let record = transaction ?? LedgerTransaction(accountID: accountID, date: date, direction: direction, amountCents: cents, payee: payee, category: category)
         record.accountID = accountID
         record.date = date
@@ -813,6 +843,9 @@ private struct TransactionEditorView: View {
         if isNew { modelContext.insert(record) }
         let action: AuditAction = isNew && isAdjustment ? .adjustment : (isNew ? .create : .edit)
         let displayName = record.payee.isEmpty ? record.category : record.payee
+        // An edit entry that lists only the final values cannot show what was changed; include a
+        // field-by-field before → after diff so the audit trail is reviewable.
+        let changes = before?.changes(to: TransactionSnapshot(record, accountName: accountName)) ?? []
         AuditLogger.record(
             action,
             recordType: "Transaction",
@@ -826,7 +859,7 @@ private struct TransactionEditorView: View {
                 ("Category", record.category),
                 ("Corrects transaction ID", record.adjustsTransactionID?.uuidString),
                 ("Adjustment reason", record.adjustmentReason),
-            ]),
+            ] + changes),
             in: modelContext
         )
         dismiss()

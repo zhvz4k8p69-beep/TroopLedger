@@ -38,12 +38,15 @@ struct ReconciliationView: View {
         guard let lockedThrough else { return true }
         return Calendar.current.startOfDay(for: statementDate) > lockedThrough
     }
+    private var statementDateIsInFuture: Bool {
+        Calendar.current.startOfDay(for: statementDate) > Calendar.current.startOfDay(for: Date())
+    }
 
     var body: some View {
         content
         .pageToolbar(title: "Reconcile") {
             Button("Finish Reconciliation", systemImage: "checkmark.seal", action: finish)
-                .disabled(account == nil || statementCents == nil || difference != 0 || !statementDateIsAfterLock)
+                .disabled(account == nil || statementCents == nil || difference != 0 || !statementDateIsAfterLock || statementDateIsInFuture)
         }
         .onAppear {
             if accountID == nil { accountID = accounts.first(where: \.isActive)?.id }
@@ -91,7 +94,7 @@ struct ReconciliationView: View {
                 Text("Choose an account").tag(nil as UUID?)
                 ForEach(accounts.filter(\.isActive)) { Text($0.name).tag($0.id as UUID?) }
             }
-            DatePicker("Statement ending date", selection: $statementDate, displayedComponents: .date)
+            DatePicker("Statement ending date", selection: $statementDate, in: ...Date(), displayedComponents: .date)
             AmountField(title: "Statement ending balance", text: $endingBalance)
             TextField("Notes", text: $notes)
             if let lockedThrough {
@@ -113,6 +116,8 @@ struct ReconciliationView: View {
                 )
                 if !statementDateIsAfterLock {
                     Text("Choose a statement date after the current lock.").foregroundStyle(.orange)
+                } else if statementDateIsInFuture {
+                    Text("The statement date cannot be in the future.").foregroundStyle(.orange)
                 } else if difference == 0 {
                     Text("Ready to reconcile").foregroundStyle(Color.fieldbookPositive)
                 } else {

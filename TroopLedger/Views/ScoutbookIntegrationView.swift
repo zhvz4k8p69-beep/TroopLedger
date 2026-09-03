@@ -193,6 +193,7 @@ struct ScoutbookIntegrationView: View {
                                 .foregroundStyle(.orange)
                         }
                     }
+                    .deleteDisabled(syncingIDs.contains(subscription.id))
                 }
                 .onDelete(perform: removeSubscriptions)
             }

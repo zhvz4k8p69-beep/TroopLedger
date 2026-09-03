@@ -112,8 +112,12 @@ struct TreasurerReportCenterView: View {
         switch result {
         case .success(let url):
             AuditLogger.record(.export, recordType: "Treasurer Report", recordID: nil, summary: "Exported \(kind)", details: AuditLogger.details([("File", url.lastPathComponent), ("Period", "\(month.0.formatted(date: .numeric, time: .omitted)) through \(month.1.formatted(date: .numeric, time: .omitted))")]), in: modelContext)
-            try? modelContext.save()
-            message = "Exported \(url.lastPathComponent)."
+            do {
+                try modelContext.save()
+                message = "Exported \(url.lastPathComponent)."
+            } catch {
+                message = "Exported \(url.lastPathComponent), but its audit entry could not be saved: \(error.localizedDescription)"
+            }
         case .failure(let error):
             let nsError = error as NSError
             if !(error is CancellationError), nsError.code != NSUserCancelledError { message = "The export failed: \(error.localizedDescription)" }
@@ -179,8 +183,12 @@ struct AnnualAuditExportView: View {
         switch result {
         case .success(let url):
             AuditLogger.record(.export, recordType: "Annual Audit Package", recordID: nil, summary: "Exported annual audit and treasurer-turnover package", details: AuditLogger.details([("File", url.lastPathComponent), ("School year", period.label)]), in: modelContext)
-            try? modelContext.save()
-            message = "Exported \(url.lastPathComponent)."
+            do {
+                try modelContext.save()
+                message = "Exported \(url.lastPathComponent)."
+            } catch {
+                message = "Exported \(url.lastPathComponent), but its audit entry could not be saved: \(error.localizedDescription)"
+            }
         case .failure(let error):
             let nsError = error as NSError
             if !(error is CancellationError), nsError.code != NSUserCancelledError { message = "The export failed: \(error.localizedDescription)" }

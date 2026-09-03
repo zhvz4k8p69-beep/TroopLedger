@@ -178,6 +178,16 @@ enum SpreadsheetImporter {
         guard !priorImports.contains(where: { $0.sourceFingerprint == snapshot.sourceFingerprint }) else {
             throw SpreadsheetImportError.alreadyImported
         }
+        // The import record alone is not enough: two devices can each run the import before CloudKit has
+        // delivered the other's ImportRecord, doubling every balance. The snapshot carries fixed record IDs,
+        // so any of them already present means the workbook is in the database.
+        let snapshotIDs = Set(snapshot.accounts.map(\.id) + snapshot.people.map(\.id) + snapshot.transactions.map(\.id))
+        let existingIDs = Set(
+            try modelContext.fetch(FetchDescriptor<AccountRecord>()).map(\.id)
+                + modelContext.fetch(FetchDescriptor<PersonRecord>()).map(\.id)
+                + modelContext.fetch(FetchDescriptor<LedgerTransaction>()).map(\.id)
+        )
+        guard snapshotIDs.isDisjoint(with: existingIDs) else { throw SpreadsheetImportError.alreadyImported }
 
         // rollback() below discards every unsaved change in the shared context, so persist unrelated
         // pending edits first; a failed import must only undo the import itself.

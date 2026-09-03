@@ -24,6 +24,8 @@ struct CalendarSyncResult: Sendable {
 enum ScoutbookCalendarError: LocalizedError, Equatable {
     case invalidURL
     case insecureURL
+    case embeddedCredentials
+    case subscriptionRemoved
     case badResponse
     case oversizedFeed
     case tooManyEvents
@@ -34,6 +36,8 @@ enum ScoutbookCalendarError: LocalizedError, Equatable {
         switch self {
         case .invalidURL: "Enter the complete Scoutbook calendar subscription URL."
         case .insecureURL: "Scoutbook calendar subscriptions must use a secure HTTPS URL, including after any redirect."
+        case .embeddedCredentials: "Remove the username and password from the calendar URL. TroopLedger never sends sign-in credentials to a calendar host."
+        case .subscriptionRemoved: "This calendar subscription was removed while it was syncing."
         case .badResponse: "Scoutbook did not return a successful calendar response."
         case .oversizedFeed: "The calendar feed is larger than the app's 5 MB safety limit."
         case .tooManyEvents: "The calendar feed expands to more than \(ScoutbookCalendarService.maximumExpandedEvents) events, which exceeds the app's safety limit."
@@ -60,6 +64,11 @@ private final class FeedRedirectPolicy: NSObject, URLSessionTaskDelegate, @unche
 enum ScoutbookCalendarService {
     static let maximumFeedBytes = 5_000_000
     static let maximumExpandedEvents = 5_000
+    /// Per-field ceilings for feed text. A CloudKit record is limited to about 1 MB, so one oversized
+    /// DESCRIPTION would make its event unsyncable on every device.
+    static let maximumTitleLength = 500
+    static let maximumLocationLength = 1_000
+    static let maximumNotesLength = 20_000
 
     /// Ephemeral session: nothing from a private calendar feed is written to the shared cookie jar, credential
     /// store, or on-disk URL cache, and redirects are constrained by `FeedRedirectPolicy`.
@@ -79,6 +88,8 @@ enum ScoutbookCalendarService {
             throw ScoutbookCalendarError.invalidURL
         }
         guard url.scheme?.lowercased() == "https" else { throw ScoutbookCalendarError.insecureURL }
+        // userinfo in a URL is sent as HTTP Basic credentials to whatever host the URL names.
+        guard url.user == nil, url.password == nil else { throw ScoutbookCalendarError.embeddedCredentials }
         return url
     }
 
@@ -136,6 +147,7 @@ enum ScoutbookCalendarService {
         }
 
         var results: [ScoutbookCalendarEvent] = []
+        var overrides: [String: ScoutbookCalendarEvent] = [:]
         for raw in rawEvents {
             guard let startProperty = raw["DTSTART"],
                   let parsedStart = parseDate(startProperty.value, parameters: startProperty.parameters) else { continue }
@@ -148,28 +160,44 @@ enum ScoutbookCalendarService {
             }
             if end < parsedStart.date { end = parsedStart.date }
 
-            let title = decodeText(raw["SUMMARY"]?.value ?? "Scoutbook Event")
-            let location = decodeText(raw["LOCATION"]?.value ?? "")
-            let notes = decodeText(raw["DESCRIPTION"]?.value ?? "")
+            let title = String(decodeText(raw["SUMMARY"]?.value ?? "Scoutbook Event").prefix(maximumTitleLength))
+            let location = String(decodeText(raw["LOCATION"]?.value ?? "").prefix(maximumLocationLength))
+            let notes = String(decodeText(raw["DESCRIPTION"]?.value ?? "").prefix(maximumNotesLength))
             let modified = raw["LAST-MODIFIED"].flatMap { parseDate($0.value, parameters: $0.parameters)?.date }
             let recurrenceID = raw["RECURRENCE-ID"].flatMap { parseDate($0.value, parameters: $0.parameters)?.date }
             let uid = raw["UID"]?.value ?? stableID("\(title)|\(parsedStart.date.timeIntervalSince1970)|\(location)")
             let externalID = recurrenceID.map { "\(uid)#\(Int($0.timeIntervalSince1970))" } ?? uid
             let base = ScoutbookCalendarEvent(externalID: externalID, title: title, startDate: parsedStart.date, endDate: end, location: location, notes: notes, isAllDay: parsedStart.isDateOnly, modifiedAt: modified)
+            if recurrenceID != nil {
+                // A RECURRENCE-ID VEVENT replaces one occurrence of its series. Hold it aside so it wins
+                // regardless of whether the feed lists it before or after the master event.
+                overrides[externalID] = base
+                continue
+            }
             results.append(contentsOf: expand(base, rule: raw["RRULE"]?.value))
             // Every recurring VEVENT can expand to hundreds of records; bound the total so a feed cannot
             // flood the database (and CloudKit) with millions of synchronized events.
-            guard results.count <= maximumExpandedEvents else { throw ScoutbookCalendarError.tooManyEvents }
+            guard results.count + overrides.count <= maximumExpandedEvents else { throw ScoutbookCalendarError.tooManyEvents }
         }
+        var unmatchedOverrides = overrides
+        results = results.map { occurrence in
+            guard let override = unmatchedOverrides.removeValue(forKey: occurrence.externalID) else { return occurrence }
+            return override
+        }
+        results.append(contentsOf: unmatchedOverrides.values.sorted { $0.startDate < $1.startDate })
         guard !results.isEmpty else { throw ScoutbookCalendarError.noEvents }
         return results
     }
 
     @MainActor
     static func sync(subscription: ExternalCalendarSubscription, into modelContext: ModelContext) async throws -> CalendarSyncResult {
+        // Persist unrelated pending edits first so a failed sync can roll back only its own partial writes.
+        if modelContext.hasChanges { try modelContext.save() }
         do {
             let url = try validatedURL(subscription.feedURLString)
             let feedEvents = try await fetch(url: url)
+            // The user may have deleted the subscription while the download was in flight.
+            guard !subscription.isDeleted else { throw ScoutbookCalendarError.subscriptionRemoved }
             let result = try apply(feedEvents: feedEvents, to: subscription, in: modelContext)
 
             subscription.lastSyncedAt = Date()
@@ -192,8 +220,13 @@ enum ScoutbookCalendarService {
             try modelContext.save()
             return result
         } catch {
-            subscription.lastError = error.localizedDescription
-            try? modelContext.save()
+            // Never leave a half-applied feed behind: inserted, updated, and deleted events from this attempt
+            // are discarded together, then only the error is recorded.
+            modelContext.rollback()
+            if !subscription.isDeleted {
+                subscription.lastError = error.localizedDescription
+                try? modelContext.save()
+            }
             throw error
         }
     }
@@ -207,6 +240,12 @@ enum ScoutbookCalendarService {
         let storedEvents = try modelContext.fetch(FetchDescriptor<EventRecord>())
         let subscribedEvents = storedEvents.filter { $0.calendarSubscriptionID == subscription.id }
         var byExternalID: [String: EventRecord] = [:]
+        // Events that were detached earlier (they vanished from the feed but carried local records) keep
+        // their external ID. If the feed lists them again, re-attach instead of inserting a duplicate.
+        for event in storedEvents where event.calendarSubscriptionID == nil
+            && event.sourceSystem == "Scoutbook Calendar" && !event.externalSourceID.isEmpty {
+            byExternalID[event.externalSourceID] = event
+        }
         for event in subscribedEvents where !event.externalSourceID.isEmpty {
             byExternalID[event.externalSourceID] = event
         }

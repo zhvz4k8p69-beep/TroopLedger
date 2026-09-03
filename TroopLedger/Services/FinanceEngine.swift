@@ -46,6 +46,7 @@ enum ReconciliationCompletionError: LocalizedError, Equatable {
     case accountRequired
     case inactiveAccount
     case statementDateNotAfterLock(Date)
+    case statementDateInFuture
     case outOfBalance
     case ineligibleSelection
 
@@ -54,6 +55,7 @@ enum ReconciliationCompletionError: LocalizedError, Equatable {
         case .accountRequired: "Choose an account to reconcile."
         case .inactiveAccount: "Inactive accounts cannot receive a new reconciliation. Reactivate the account first."
         case .statementDateNotAfterLock(let date): "Choose a statement date after the existing lock through \(date.formatted(date: .long, time: .omitted))."
+        case .statementDateInFuture: "A statement date cannot be in the future. Reconciling through a future date would lock the register until then."
         case .outOfBalance: "The reconciliation difference must be zero before finishing."
         case .ineligibleSelection: "The selected transactions changed or no longer belong to this account and statement period. Review the selection again."
         }
@@ -69,10 +71,16 @@ enum ReconciliationCompletionPolicy {
         selectedTransactionIDs: Set<UUID>,
         transactions: [LedgerTransaction],
         reconciliations: [ReconciliationRecord],
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        now: Date = Date()
     ) throws {
         guard let account else { throw ReconciliationCompletionError.accountRequired }
         guard account.isActive else { throw ReconciliationCompletionError.inactiveAccount }
+        // A lock is irreversible in the app, so a mistyped future statement date would freeze posting
+        // for every day up to that date.
+        guard calendar.startOfDay(for: statementDate) <= calendar.startOfDay(for: now) else {
+            throw ReconciliationCompletionError.statementDateInFuture
+        }
         if let lockDate = PeriodLocking.latestLockDate(for: account.id, reconciliations: reconciliations, calendar: calendar),
            calendar.startOfDay(for: statementDate) <= lockDate {
             throw ReconciliationCompletionError.statementDateNotAfterLock(lockDate)
@@ -375,15 +383,30 @@ enum PeriodLocking {
 }
 
 enum Money {
+    /// Largest single amount the app accepts, in cents ($1 billion). Int64 arithmetic traps on overflow, so
+    /// two imported rows near `Int64.max` would crash every balance calculation; a sane per-amount ceiling
+    /// keeps sums of any realistic register far from the limit.
+    static let maximumCents: Int64 = 100_000_000_000
+
+    static func isWithinLimit(_ cents: Int64) -> Bool {
+        cents >= -maximumCents && cents <= maximumCents
+    }
+
     static func cents(from text: String) -> Int64? {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         formatter.locale = .current
-        guard let number = formatter.number(from: text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
+        // Treasurers type what a bank statement shows: "$1,250.00". Strip the currency symbol before parsing.
+        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for symbol in Set(["$", Locale.current.currencySymbol ?? "$", formatter.currencySymbol ?? "$"]) where !symbol.isEmpty {
+            cleaned = cleaned.replacingOccurrences(of: symbol, with: "")
+        }
+        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let number = formatter.number(from: cleaned) else { return nil }
         var scaled = number.decimalValue * 100
         var rounded = Decimal()
         NSDecimalRound(&rounded, &scaled, 0, .plain)
-        guard rounded <= Decimal(Int64.max), rounded > Decimal(Int64.min) else { return nil }
+        guard rounded <= Decimal(maximumCents), rounded >= Decimal(-maximumCents) else { return nil }
         return NSDecimalNumber(decimal: rounded).int64Value
     }
 

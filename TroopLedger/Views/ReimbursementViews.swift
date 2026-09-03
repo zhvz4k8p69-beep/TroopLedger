@@ -253,7 +253,7 @@ struct ReimbursementDetailView: View {
     @Query(sort: \EventRecord.startDate, order: .reverse) private var events: [EventRecord]
     @Query(sort: \LedgerTransaction.date, order: .reverse) private var transactions: [LedgerTransaction]
     @Query(sort: \ReimbursementAttachment.createdAt) private var allAttachments: [ReimbursementAttachment]
-    @Query private var controlSettings: [DisbursementControlSettings]
+    @Query(sort: \DisbursementControlSettings.modifiedAt, order: .reverse) private var controlSettings: [DisbursementControlSettings]
     let request: ReimbursementRequest
     @State private var showingEdit = false
     @State private var showingReview = false
@@ -462,7 +462,7 @@ private struct ReimbursementReviewView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \PersonRecord.lastName) private var people: [PersonRecord]
-    @Query private var controlSettings: [DisbursementControlSettings]
+    @Query(sort: \DisbursementControlSettings.modifiedAt, order: .reverse) private var controlSettings: [DisbursementControlSettings]
     let request: ReimbursementRequest
     @State private var reviewerName = AuditIdentity.current.userIdentity
     @State private var approverPersonID: UUID?
@@ -550,7 +550,7 @@ private struct ReimbursementPaymentView: View {
     @Query(sort: \LedgerTransaction.date, order: .reverse) private var transactions: [LedgerTransaction]
     @Query(sort: \ReimbursementRequest.submittedAt, order: .reverse) private var requests: [ReimbursementRequest]
     @Query(sort: \ReconciliationRecord.statementDate, order: .reverse) private var reconciliations: [ReconciliationRecord]
-    @Query private var controlSettings: [DisbursementControlSettings]
+    @Query(sort: \DisbursementControlSettings.modifiedAt, order: .reverse) private var controlSettings: [DisbursementControlSettings]
     let request: ReimbursementRequest
     let requesterName: String
     @State private var mode = PaymentLinkMode.create
@@ -690,10 +690,22 @@ private struct ReceiptPreviewView: View {
     }
 }
 
+/// Receipts are documents supplied by third parties. PDFKit opens link annotations in the browser by default,
+/// so a crafted receipt could send the treasurer to an arbitrary site with one click; taking over link handling
+/// and doing nothing keeps the preview strictly read-only.
+private final class ReceiptPDFLinkBlocker: NSObject, PDFViewDelegate {
+    nonisolated func pdfViewWillClick(onLink sender: PDFView, with url: URL) {}
+}
+
 #if os(macOS)
 private struct ReceiptPDFView: NSViewRepresentable {
     let data: Data
-    func makeNSView(context: Context) -> PDFView { PDFView() }
+    func makeCoordinator() -> ReceiptPDFLinkBlocker { ReceiptPDFLinkBlocker() }
+    func makeNSView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.delegate = context.coordinator
+        return view
+    }
     func updateNSView(_ view: PDFView, context: Context) {
         view.document = PDFDocument(data: data)
         view.autoScales = true
@@ -702,7 +714,12 @@ private struct ReceiptPDFView: NSViewRepresentable {
 #else
 private struct ReceiptPDFView: UIViewRepresentable {
     let data: Data
-    func makeUIView(context: Context) -> PDFView { PDFView() }
+    func makeCoordinator() -> ReceiptPDFLinkBlocker { ReceiptPDFLinkBlocker() }
+    func makeUIView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.delegate = context.coordinator
+        return view
+    }
     func updateUIView(_ view: PDFView, context: Context) {
         view.document = PDFDocument(data: data)
         view.autoScales = true

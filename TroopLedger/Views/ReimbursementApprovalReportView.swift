@@ -8,10 +8,11 @@ struct ReimbursementApprovalReportView: View {
     @Query private var transactions: [LedgerTransaction]
     @Query private var people: [PersonRecord]
     @Query private var auditEntries: [AuditLogEntry]
-    @Query private var controlSettings: [DisbursementControlSettings]
+    @Query(sort: \DisbursementControlSettings.modifiedAt, order: .reverse) private var controlSettings: [DisbursementControlSettings]
     @Query(sort: \TroopProfileRecord.modifiedAt, order: .reverse) private var troopProfiles: [TroopProfileRecord]
     @State private var issueFilter: ReimbursementApprovalIssueKind?
     @State private var exportDocument: ReimbursementApprovalCSVDocument?
+    @State private var exportedReport: ReimbursementApprovalReport?
     @State private var exportFilename = ReimbursementApprovalReportService.defaultFilename()
     @State private var showingExporter = false
     @State private var exportMessage: String?
@@ -121,6 +122,7 @@ struct ReimbursementApprovalReportView: View {
             policy: DisbursementControlPolicy(settings: controlSettings.first),
             generatedAt: generatedAt
         )
+        exportedReport = exportReport
         exportDocument = ReimbursementApprovalCSVDocument(csv: ReimbursementApprovalReportService.csv(
             for: exportReport,
             troop: TroopReportIdentity(profile: troopProfiles.first)
@@ -132,7 +134,9 @@ struct ReimbursementApprovalReportView: View {
     private func completeExport(_ result: Result<URL, Error>) {
         switch result {
         case .success(let url):
-            let exportedReport = report
+            // Describe the report that was actually written, not the live one, which may have changed
+            // while the save panel was open.
+            let exportedReport = exportedReport ?? report
             AuditLogger.record(
                 .export,
                 recordType: "Reimbursement Approval Report",

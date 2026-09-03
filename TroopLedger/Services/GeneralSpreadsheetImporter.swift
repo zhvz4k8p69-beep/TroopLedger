@@ -456,7 +456,7 @@ enum GeneralSpreadsheetImporter {
         var scaled = decimal * 100
         var rounded = Decimal()
         NSDecimalRound(&rounded, &scaled, 0, .plain)
-        guard rounded <= Decimal(Int64.max), rounded > Decimal(Int64.min) else { return nil }
+        guard rounded <= Decimal(Money.maximumCents), rounded >= Decimal(-Money.maximumCents) else { return nil }
         return NSDecimalNumber(decimal: rounded).int64Value
     }
 
@@ -506,39 +506,50 @@ enum GeneralSpreadsheetImporter {
         }
     }
 
+    /// Longest value kept for a single cell. A CloudKit record is limited to about 1 MB, so one multi-megabyte
+    /// memo cell would make its transaction unsyncable; nothing legitimate in a register needs more than this.
+    static let maximumCellLength = 10_000
+
     private static func parseTable(_ text: String, delimiter: Character) -> [[String]] {
         var result: [[String]] = []
         var row: [String] = []
         var field = ""
+        var fieldLength = 0
         var quoted = false
         let characters = Array(text)
         var index = 0
+        func append(_ character: Character) {
+            if fieldLength < maximumCellLength { field.append(character) }
+            fieldLength += 1
+        }
         while index < characters.count {
             let character = characters[index]
             if quoted {
                 if character == "\"" {
                     if index + 1 < characters.count && characters[index + 1] == "\"" {
-                        field.append("\"")
+                        append("\"")
                         index += 1
                     } else {
                         quoted = false
                     }
                 } else {
-                    field.append(character)
+                    append(character)
                 }
             } else if character == "\"" && field.isEmpty {
                 quoted = true
             } else if character == delimiter {
                 row.append(field)
                 field = ""
+                fieldLength = 0
             } else if character == "\n" || character == "\r" {
                 if character == "\r", index + 1 < characters.count, characters[index + 1] == "\n" { index += 1 }
                 row.append(field)
                 result.append(row)
                 row = []
                 field = ""
+                fieldLength = 0
             } else {
-                field.append(character)
+                append(character)
             }
             index += 1
         }

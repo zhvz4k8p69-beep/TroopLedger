@@ -358,43 +358,55 @@ enum ScoutbookImporter {
         return String(data: data, encoding: .isoLatin1)
     }
 
+    /// Longest value kept for a single cell; see `GeneralSpreadsheetImporter.maximumCellLength`.
+    static let maximumCellLength = GeneralSpreadsheetImporter.maximumCellLength
+
     private static func parseTable(_ text: String, delimiter: Character) -> [[String]] {
         var result: [[String]] = []
         var row: [String] = []
         var field = ""
+        var fieldLength = 0
         var quoted = false
         let characters = Array(text)
         var index = 0
+        func append(_ character: Character) {
+            if fieldLength < maximumCellLength { field.append(character) }
+            fieldLength += 1
+        }
         while index < characters.count {
             let character = characters[index]
             if quoted {
                 if character == "\"" {
                     if index + 1 < characters.count && characters[index + 1] == "\"" {
-                        field.append("\"")
+                        append("\"")
                         index += 1
                     } else {
                         quoted = false
                     }
                 } else {
-                    field.append(character)
+                    append(character)
                 }
             } else if character == "\"" && field.isEmpty {
                 quoted = true
             } else if character == delimiter {
                 row.append(field)
                 field = ""
-            } else if character == "\n" {
-                row.append(field.trimmingCharacters(in: CharacterSet(charactersIn: "\r")))
+                fieldLength = 0
+            } else if character == "\n" || character == "\r" {
+                // Accept LF, CRLF, and bare CR line endings; a bare-CR export used to collapse into one row.
+                if character == "\r", index + 1 < characters.count, characters[index + 1] == "\n" { index += 1 }
+                row.append(field)
                 result.append(row)
                 row = []
                 field = ""
+                fieldLength = 0
             } else {
-                field.append(character)
+                append(character)
             }
             index += 1
         }
         if !field.isEmpty || !row.isEmpty {
-            row.append(field.trimmingCharacters(in: CharacterSet(charactersIn: "\r")))
+            row.append(field)
             result.append(row)
         }
         return result
@@ -483,7 +495,7 @@ enum ScoutbookImporter {
         var rounded = Decimal()
         NSDecimalRound(&rounded, &value, 0, .plain)
         // int64Value silently wraps for out-of-range decimals, turning "99999999999999999999" into garbage cents.
-        guard rounded <= Decimal(Int64.max), rounded > Decimal(Int64.min) else { return nil }
+        guard rounded <= Decimal(Money.maximumCents), rounded >= Decimal(-Money.maximumCents) else { return nil }
         let cents = NSDecimalNumber(decimal: rounded).int64Value
         return negative && cents > 0 ? -cents : cents
     }

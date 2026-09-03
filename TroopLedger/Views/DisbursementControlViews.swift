@@ -300,7 +300,7 @@ struct TroopProfileSettingsView: View {
 struct DisbursementControlSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
-    @Query private var storedSettings: [DisbursementControlSettings]
+    @Query(sort: \DisbursementControlSettings.modifiedAt, order: .reverse) private var storedSettings: [DisbursementControlSettings]
     var showsDismissButton = true
     @State private var isEnabled = true
     @State private var expectApprover = true

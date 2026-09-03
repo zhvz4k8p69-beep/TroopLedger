@@ -316,7 +316,7 @@ enum AnnualAuditPackageService {
         let budgetLines = try context.fetch(FetchDescriptor<BudgetLineRecord>())
         let requests = try context.fetch(FetchDescriptor<ReimbursementRequest>())
         let attachments = try context.fetch(FetchDescriptor<ReimbursementAttachment>())
-        let settings = try context.fetch(FetchDescriptor<DisbursementControlSettings>()).first
+        let settings = try context.fetch(FetchDescriptor<DisbursementControlSettings>(sortBy: [SortDescriptor(\.modifiedAt, order: .reverse)])).first
         let audit = try context.fetch(FetchDescriptor<AuditLogEntry>())
         let inclusiveEnd = Calendar.current.date(byAdding: .day, value: -1, to: period.endDateExclusive) ?? period.endDateExclusive
         let matchingBudgets = budgets.filter { $0.reportingYearStart == period.startingYear }

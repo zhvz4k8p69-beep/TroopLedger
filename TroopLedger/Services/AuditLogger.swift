@@ -14,11 +14,25 @@ struct AuditIdentity: Equatable {
         let localUser = ""
 #endif
         return AuditIdentity(
-            deviceName: process.hostName,
+            deviceName: cachedDeviceName,
             operatingSystem: process.operatingSystemVersionString,
             userIdentity: localUser
         )
     }
+
+    /// `ProcessInfo.hostName` performs a synchronous reverse-DNS lookup that can stall the main thread for
+    /// seconds on a slow or captive network, and it ran for every audit entry. The kernel hostname is read
+    /// once without touching the network.
+    private static let cachedDeviceName: String = {
+#if os(macOS)
+        if let name = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+#endif
+        var buffer = [CChar](repeating: 0, count: 256)
+        guard gethostname(&buffer, buffer.count) == 0 else { return "" }
+        return String(cString: buffer)
+    }()
 }
 
 @MainActor
