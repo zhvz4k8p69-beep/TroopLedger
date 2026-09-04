@@ -3590,4 +3590,249 @@ final class FinanceEngineTests: XCTestCase {
         XCTAssertEqual(try context.fetch(FetchDescriptor<PersonRecord>()).count, 2)
         XCTAssertTrue(result.issues.first?.contains("more than one person") == true)
     }
+
+    // MARK: - Ninth round regressions
+
+    func testHoldingAccountsRejectShrinkingOrRemovingReceipts() {
+        let cashBox = AccountRecord(name: "Cash Box", kind: .cash)
+        let receipt = LedgerTransaction(accountID: cashBox.id, date: Date(), direction: .income, amountCents: 10_000, payee: "Family", category: "Dues")
+        let spend = LedgerTransaction(accountID: cashBox.id, date: Date(), direction: .expense, amountCents: 8_000, payee: "Store", category: "Supplies")
+        let register = [receipt, spend]
+        // Editing the $100 receipt down to $10 leaves the box $70 short.
+        XCTAssertThrowsError(try HoldingAccountPolicy.validate(account: cashBox, transactions: register, editing: receipt.id, direction: .income, amountCents: 1_000)) { error in
+            XCTAssertEqual(error as? HoldingAccountValidationError, .wouldOverdraw(accountName: "Cash Box", shortfallCents: 7_000))
+        }
+        XCTAssertNoThrow(try HoldingAccountPolicy.validate(account: cashBox, transactions: register, editing: receipt.id, direction: .income, amountCents: 8_000))
+        // Flipping the receipt into an expense is the same overdraft.
+        XCTAssertThrowsError(try HoldingAccountPolicy.validate(account: cashBox, transactions: register, editing: receipt.id, direction: .expense, amountCents: 100))
+        // Deleting or moving it out is checked separately.
+        XCTAssertThrowsError(try HoldingAccountPolicy.validateRemoval(of: receipt, from: cashBox, transactions: register))
+        XCTAssertNoThrow(try HoldingAccountPolicy.validateRemoval(of: spend, from: cashBox, transactions: register))
+        let checking = AccountRecord(name: "Checking", kind: .checking)
+        XCTAssertNoThrow(try HoldingAccountPolicy.validateRemoval(of: receipt, from: checking, transactions: register))
+    }
+
+    func testAnnualReportFoldsCategorySpellingsLikeTheBudgetReport() throws {
+        let calendar = Calendar(identifier: .gregorian)
+        let date = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 1)))
+        let rows = ["Dues", " Dues", "dues", "DUES "].map {
+            LedgerTransaction(accountID: nil, date: date, direction: .income, amountCents: 1_000, payee: "Family", category: $0)
+        }
+        let report = FinanceEngine.annualReport(year: 2026, transactions: rows, calendar: calendar)
+        XCTAssertEqual(report.income.count, 1)
+        XCTAssertEqual(report.income.first?.amountCents, 4_000)
+        XCTAssertEqual(report.income.first?.category, "Dues")
+    }
+
+    func testBudgetVarianceFollowsARenamedCategory() throws {
+        let category = LedgerCategoryRecord(name: "Camping and Activities", direction: .expense)
+        let line = BudgetLineRecord(budgetID: nil, categoryID: category.id, categoryName: "Camping", direction: .expense, amountCents: 60_000)
+        let period = ReportingPeriod(basis: .schoolYear, startingYear: 2026)
+        let spend = LedgerTransaction(accountID: nil, date: period.startDate.addingTimeInterval(86_400), direction: .expense, amountCents: 55_000, payee: "Camp", category: "Camping and Activities")
+        let report = BudgetEngine.varianceReport(period: period, transactions: [spend], budgetLines: [line], categories: [category])
+        XCTAssertEqual(report.expenses.count, 1)
+        XCTAssertEqual(report.expenses.first?.budgetCents, 60_000)
+        XCTAssertEqual(report.expenses.first?.actualCents, 55_000)
+    }
+
+    func testCSVParsersAcceptWindowsLineEndings() throws {
+        let register = try GeneralSpreadsheetImporter.parse(data: Data("Date,Amount,Payee\r\n9/1/2026,10.00,Family A\r\n9/2/2026,-5.00,Store\r\n".utf8), sourceName: "bank.csv")
+        XCTAssertEqual(register.headers, ["Date", "Amount", "Payee"])
+        XCTAssertEqual(register.rows.count, 2)
+        let roster = try ScoutbookImporter.parse(data: Data("First Name,Last Name\r\nAva,Scout\r\nBen,Scout\r\n".utf8), sourceName: "members.csv")
+        XCTAssertEqual(roster.rows.count, 2)
+    }
+
+    func testSpreadsheetDecodesExcelUnicodeTextExports() throws {
+        let text = "Date\tAmount\n9/1/2026\t10.00\n"
+        var data = Data([0xFF, 0xFE])
+        data.append(text.data(using: .utf16LittleEndian)!)
+        let document = try GeneralSpreadsheetImporter.parse(data: data, sourceName: "unicode.txt")
+        XCTAssertEqual(document.headers, ["Date", "Amount"])
+        XCTAssertEqual(document.rows.count, 1)
+    }
+
+    func testImportersRejectAmountsWithTrailingText() throws {
+        XCTAssertTrue(GeneralSpreadsheetImporter.isPlainDecimal("1250.50"))
+        XCTAssertTrue(GeneralSpreadsheetImporter.isPlainDecimal("-7"))
+        XCTAssertTrue(GeneralSpreadsheetImporter.isPlainDecimal(".5"))
+        XCTAssertFalse(GeneralSpreadsheetImporter.isPlainDecimal("12/25/2024"))
+        XCTAssertFalse(GeneralSpreadsheetImporter.isPlainDecimal("45.00 USD"))
+        XCTAssertFalse(GeneralSpreadsheetImporter.isPlainDecimal("1e3"))
+        XCTAssertFalse(GeneralSpreadsheetImporter.isPlainDecimal("12.50.30"))
+        XCTAssertFalse(GeneralSpreadsheetImporter.isPlainDecimal(""))
+        // A misaligned column that puts a date in Amount must surface as an exception, not $12.00.
+        let document = try GeneralSpreadsheetImporter.parse(data: Data("Date,Amount,Payee\n9/1/2026,12/25/2024,Family\n".utf8), sourceName: "bank.csv")
+        let preview = GeneralSpreadsheetImporter.preview(document: document, mapping: .detected(from: document.headers), accountID: UUID(), defaultDirection: .income, defaultCategory: "Dues", reconciliations: [])
+        XCTAssertTrue(preview.validRows.isEmpty)
+        XCTAssertEqual(preview.invalidRows.count, 1)
+    }
+
+    func testSignedAmountWithUnfamiliarTypeLabelImportsAsExpense() throws {
+        let document = try GeneralSpreadsheetImporter.parse(data: Data("Date,Amount,Type,Payee\n9/1/2026,-500.00,WIRE_OUTGOING,Camp\n9/2/2026,500.00,ZELLE,Family\n".utf8), sourceName: "bank.csv")
+        let mapping = TransactionColumnMapping.detected(from: document.headers)
+        let preview = GeneralSpreadsheetImporter.preview(document: document, mapping: mapping, accountID: UUID(), defaultDirection: .income, defaultCategory: "Dues", reconciliations: [])
+        XCTAssertEqual(preview.validRows.count, 1)
+        XCTAssertEqual(preview.validRows.first?.draft?.direction, .expense)
+        XCTAssertEqual(preview.validRows.first?.draft?.amountCents, 50_000)
+        // A positive amount with an unknown label stays ambiguous.
+        XCTAssertEqual(preview.invalidRows.count, 1)
+    }
+
+    func testCalendarParserIgnoresPropertiesInsideNestedAlarms() throws {
+        let ics = """
+        BEGIN:VCALENDAR
+        BEGIN:VEVENT
+        UID:alarm-1
+        DTSTART:20260915T190000
+        SUMMARY:Troop Meeting
+        DESCRIPTION:Bring your handbook
+        BEGIN:VALARM
+        ACTION:DISPLAY
+        DESCRIPTION:This is an event reminder
+        SUMMARY:Reminder
+        TRIGGER:-PT30M
+        END:VALARM
+        END:VEVENT
+        END:VCALENDAR
+        """
+        let event = try XCTUnwrap(ScoutbookCalendarService.parse(data: Data(ics.utf8)).first)
+        XCTAssertEqual(event.title, "Troop Meeting")
+        XCTAssertEqual(event.notes, "Bring your handbook")
+    }
+
+    func testCalendarParserAllowsColonsInsideQuotedParameters() throws {
+        let ics = """
+        BEGIN:VCALENDAR
+        BEGIN:VEVENT
+        UID:exchange-1
+        DTSTART;TZID="(UTC-05:00) Eastern Time (US & Canada)":20260915T190000
+        DTEND;TZID="(UTC-05:00) Eastern Time (US & Canada)":20260915T203000
+        SUMMARY:Committee Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """
+        let event = try XCTUnwrap(ScoutbookCalendarService.parse(data: Data(ics.utf8)).first)
+        XCTAssertEqual(event.title, "Committee Meeting")
+        XCTAssertEqual(event.endDate.timeIntervalSince(event.startDate), 5_400)
+    }
+
+    func testRankMatchingAcceptsScoutbookSpellings() {
+        XCTAssertEqual(ScoutsBSARank.matching("Life Scout"), .life)
+        XCTAssertEqual(ScoutsBSARank.matching("Eagle Scout"), .eagle)
+        XCTAssertEqual(ScoutsBSARank.matching("1st Class"), .firstClass)
+        XCTAssertEqual(ScoutsBSARank.matching("2nd Class Scout"), .secondClass)
+        XCTAssertEqual(ScoutsBSARank.matching("Scout"), .scout)
+        XCTAssertNil(ScoutsBSARank.matching(""))
+        XCTAssertNil(ScoutsBSARank.matching("Webelos"))
+    }
+
+    @MainActor
+    func testReopeningClearsTheApproverSnapshot() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let request = ReimbursementRequest(requesterPersonID: UUID(), purchaseDate: Date(), purpose: "Supplies", category: "Program Supplies", amountCents: 1_000)
+        request.status = .declined
+        request.reviewerName = "Sam Chair"
+        request.reviewedAt = Date()
+        request.approverPersonID = UUID()
+        request.approverNameSnapshot = "Sam Chair"
+        request.approverHouseholdSnapshot = "Chair Family"
+        context.insert(request)
+        try context.save()
+        try ReimbursementService.reopen(request, reason: "Declined the wrong request", in: context)
+        XCTAssertNil(request.approverPersonID)
+        XCTAssertEqual(request.approverNameSnapshot, "")
+        XCTAssertEqual(request.approverHouseholdSnapshot, "")
+        let audit = try XCTUnwrap(context.fetch(FetchDescriptor<AuditLogEntry>()).first { $0.summary.contains("Reopened") })
+        XCTAssertTrue(audit.details.contains("Previous approver: Sam Chair"))
+    }
+
+    @MainActor
+    func testReimbursementPaymentCannotOverdrawACashBox() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let cashBox = AccountRecord(name: "Cash Box", kind: .cash, openingBalanceCents: 5_000)
+        let request = ReimbursementRequest(requesterPersonID: UUID(), purchaseDate: Date(), purpose: "Supplies", category: "Program Supplies", amountCents: 20_000)
+        request.status = .approved
+        request.reviewerName = "Sam Chair"
+        request.reviewedAt = Date()
+        context.insert(cashBox)
+        context.insert(request)
+        try context.save()
+        XCTAssertThrowsError(try ReimbursementService.createAndLinkPayment(for: request, accountID: cashBox.id, paymentDate: Date(), reference: "", payee: "Requester", reconciliations: [], in: context)) { error in
+            XCTAssertEqual(error as? HoldingAccountValidationError, .wouldOverdraw(accountName: "Cash Box", shortfallCents: 15_000))
+        }
+        XCTAssertNil(request.linkedTransactionID)
+    }
+
+    @MainActor
+    func testEligibleDepositTransactionsRequireAHoldingAccount() {
+        let orphan = LedgerTransaction(accountID: nil, date: Date(), direction: .income, amountCents: 1_000, payee: "Family", category: "Dues")
+        XCTAssertTrue(BatchDepositService.eligibleTransactions(undepositedFundsAccountID: nil, transactions: [orphan], allocations: []).isEmpty)
+    }
+
+    func testPrecomputedLockDatesMatchPerRowLockChecks() throws {
+        let calendar = Calendar(identifier: .gregorian)
+        let account = AccountRecord(name: "Checking", kind: .checking)
+        let january = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 1, day: 31)))
+        let february = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 2, day: 28)))
+        let reconciliations = [
+            ReconciliationRecord(accountID: account.id, statementDate: february, statementEndingBalanceCents: 0, clearedBalanceCents: 0),
+            ReconciliationRecord(accountID: account.id, statementDate: january, statementEndingBalanceCents: 0, clearedBalanceCents: 0),
+        ]
+        let lockDates = PeriodLocking.lockDates(reconciliations: reconciliations, calendar: calendar)
+        XCTAssertEqual(lockDates[account.id], calendar.startOfDay(for: february))
+        let old = LedgerTransaction(accountID: account.id, date: february, direction: .income, amountCents: 1, payee: "", category: "")
+        let new = LedgerTransaction(accountID: account.id, date: february.addingTimeInterval(86_400), direction: .income, amountCents: 1, payee: "", category: "")
+        let elsewhere = LedgerTransaction(accountID: UUID(), date: january, direction: .income, amountCents: 1, payee: "", category: "")
+        for transaction in [old, new, elsewhere] {
+            XCTAssertEqual(
+                PeriodLocking.isLocked(transaction, lockDates: lockDates, calendar: calendar),
+                PeriodLocking.isLocked(transaction, reconciliations: reconciliations, calendar: calendar)
+            )
+        }
+    }
+
+    @MainActor
+    func testCachedTreasurerIdentityRefreshesAfterTheProfileIsSaved() throws {
+        let container = try ModelContainerFactory.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let profile = TroopProfileRecord()
+        profile.treasurerName = "Dana Treasurer"
+        context.insert(profile)
+        try context.save()
+        let anonymous = AuditIdentity(deviceName: "iPad", operatingSystem: "iOS", userIdentity: "")
+        XCTAssertEqual(AuditLogger.record(.create, recordType: "Test", recordID: nil, summary: "Test", identity: anonymous, in: context).userIdentity, "Dana Treasurer (troop profile)")
+        profile.treasurerName = "Robin Treasurer"
+        profile.modifiedAt = Date()
+        try context.save()
+        AuditLogger.invalidateTreasurerIdentity()
+        XCTAssertEqual(AuditLogger.record(.create, recordType: "Test", recordID: nil, summary: "Test", identity: anonymous, in: context).userIdentity, "Robin Treasurer (troop profile)")
+    }
+
+    func testMemberAndAccountBalanceMapsMatchThePerRecordHelpers() {
+        let alice = UUID(), bob = UUID()
+        let entries = [
+            MemberLedgerEntry(personID: alice, date: Date(), kind: .charge, amountCents: 5_000, category: "Dues"),
+            MemberLedgerEntry(personID: alice, date: Date(), kind: .payment, amountCents: 2_000, category: "Dues"),
+            MemberLedgerEntry(personID: bob, date: Date(), kind: .payment, amountCents: 1_000, category: "Dues"),
+            MemberLedgerEntry(personID: nil, date: Date(), kind: .charge, amountCents: 999, category: "Dues"),
+        ]
+        let balances = FinanceEngine.memberBalances(entries: entries)
+        XCTAssertEqual(balances[alice], FinanceEngine.memberBalance(personID: alice, entries: entries))
+        XCTAssertEqual(balances[bob], FinanceEngine.memberBalance(personID: bob, entries: entries))
+        XCTAssertEqual(balances.count, 2)
+        let checking = AccountRecord(name: "Checking", kind: .checking, openingBalanceCents: 10_000)
+        let cash = AccountRecord(name: "Cash", kind: .cash)
+        let transactions = [
+            LedgerTransaction(accountID: checking.id, date: Date(), direction: .expense, amountCents: 2_500, payee: "Store", category: "Supplies"),
+            LedgerTransaction(accountID: cash.id, date: Date(), direction: .income, amountCents: 700, payee: "Family", category: "Dues"),
+        ]
+        let books = FinanceEngine.bookBalances(accounts: [checking, cash], transactions: transactions)
+        XCTAssertEqual(books[checking.id], FinanceEngine.bookBalance(account: checking, transactions: transactions))
+        XCTAssertEqual(books[cash.id], FinanceEngine.bookBalance(account: cash, transactions: transactions))
+        let position = FinanceEngine.cashPosition(accounts: [checking, cash], transactions: transactions)
+        XCTAssertEqual(position.bankAndCashOnHandCents, 8_200)
+    }
 }

@@ -6,7 +6,6 @@ struct BatchDepositListView: View {
     @Query(sort: \DepositBatchRecord.depositDate, order: .reverse) private var batches: [DepositBatchRecord]
     @Query(sort: \AccountRecord.name) private var accounts: [AccountRecord]
     @Query private var allocations: [DepositAllocationRecord]
-    @Query private var transactions: [LedgerTransaction]
     @State private var showingBuilder = false
     @State private var message: String?
 
@@ -42,7 +41,9 @@ struct BatchDepositListView: View {
                     if undepositedAccount?.isActive == false {
                         Section { inactiveNotice }
                     }
+                    let allocationCounts = Dictionary(grouping: allocations, by: \.batchID).mapValues(\.count)
                     ForEach(batches) { batch in
+                    let allocationCount = allocationCounts[batch.id] ?? 0
                     NavigationLink {
                         BatchDepositDetailView(batch: batch)
                     } label: {
@@ -50,7 +51,7 @@ struct BatchDepositListView: View {
                             Image(systemName: "tray.and.arrow.up.fill").foregroundStyle(.green)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(destinationName(batch.destinationAccountID)).font(.headline)
-                                Text("\(batch.depositDate.formatted(date: .abbreviated, time: .omitted)) • \(allocationCount(batch.id)) allocation\(allocationCount(batch.id) == 1 ? "" : "s")")
+                                Text("\(batch.depositDate.formatted(date: .abbreviated, time: .omitted)) • \(allocationCount) allocation\(allocationCount == 1 ? "" : "s")")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 if !batch.reference.isEmpty {
@@ -88,10 +89,6 @@ struct BatchDepositListView: View {
 
     private func destinationName(_ id: UUID?) -> String {
         accounts.first { $0.id == id }?.name ?? "Unknown destination"
-    }
-
-    private func allocationCount(_ batchID: UUID) -> Int {
-        allocations.filter { $0.batchID == batchID }.count
     }
 
     private func createUndepositedAccount() {

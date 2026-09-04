@@ -89,6 +89,8 @@ enum RecurringChargeBatchService {
             throw RecurringChargeBatchError.personNoLongerAvailable
         }
 
+        // Grouped once: `preferredRegistration` filtered and sorted the whole registration table per person.
+        let registrationsByPerson = Dictionary(grouping: registrations.filter { $0.personID != nil }, by: { $0.personID! })
         var missingAssessments: [String] = []
         let rows: [RecurringChargeBatchProposal.Row] = selectedPeople.compactMap { person in
             let registration: RegistrationRecord?
@@ -101,7 +103,7 @@ enum RecurringChargeBatchService {
                 registration = preferredRegistration(
                     for: person.id,
                     programYear: programYear,
-                    registrations: registrations
+                    registrations: registrationsByPerson[person.id] ?? []
                 )
                 amount = registration?.duesAssessedCents ?? 0
             }
@@ -121,12 +123,14 @@ enum RecurringChargeBatchService {
             throw RecurringChargeBatchError.missingRegistrationAssessments(missingAssessments)
         }
 
+        let normalizedCategory = normalized(category)
+        let allocationsByPerson = Dictionary(grouping: existingAllocations.filter { $0.personID != nil }, by: { $0.personID! })
         for row in rows {
-            if existingAllocations.contains(where: {
-                $0.personID == row.personID
+            // Cheap comparisons first; the calendar and locale-folding checks only run for the same person.
+            if (allocationsByPerson[row.personID] ?? []).contains(where: {
+                $0.amountCents == row.amountCents
                     && calendar.isDate($0.chargeDate, inSameDayAs: draft.chargeDate)
-                    && normalized($0.categorySnapshot) == normalized(category)
-                    && $0.amountCents == row.amountCents
+                    && normalized($0.categorySnapshot) == normalizedCategory
             }) {
                 throw RecurringChargeBatchError.duplicateCharge(row.personName)
             }

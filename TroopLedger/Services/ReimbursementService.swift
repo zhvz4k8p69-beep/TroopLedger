@@ -251,8 +251,13 @@ enum ReimbursementService {
         let data = stored.data
         let mediaType = stored.mediaType
         let fingerprint = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        let existing = try modelContext.fetch(FetchDescriptor<ReimbursementAttachment>())
-        guard !existing.contains(where: { $0.requestID == request.id && $0.sha256 == fingerprint }) else {
+        // A predicate keeps the receipt blobs of every other request out of memory; fetching all attachments
+        // faulted in each row's data just to compare two scalar fields.
+        let requestID: UUID? = request.id
+        let duplicate = FetchDescriptor<ReimbursementAttachment>(
+            predicate: #Predicate { $0.requestID == requestID && $0.sha256 == fingerprint }
+        )
+        guard try modelContext.fetchCount(duplicate) == 0 else {
             throw ReimbursementError.duplicateReceipt
         }
         var cleanName = sanitizedFilename(filename, fallbackExtension: mediaType == "application/pdf" ? "pdf" : "jpg")
@@ -335,8 +340,9 @@ enum ReimbursementService {
         // Approval without evidence is sometimes legitimate (a lost receipt for a small purchase), but the
         // reason must be written down at the moment of approval, not reconstructed later.
         if approve, reason.isEmpty {
-            let attachments = try modelContext.fetch(FetchDescriptor<ReimbursementAttachment>())
-            if !attachments.contains(where: { $0.requestID == request.id }) {
+            let requestID: UUID? = request.id
+            let receipts = FetchDescriptor<ReimbursementAttachment>(predicate: #Predicate { $0.requestID == requestID })
+            if try modelContext.fetchCount(receipts) == 0 {
                 throw ReimbursementError.receiptJustificationRequired
             }
         }
@@ -429,9 +435,17 @@ enum ReimbursementService {
         guard request.linkedTransactionID == nil else { throw ReimbursementError.transactionAlreadyLinked }
         guard calendar.startOfDay(for: paymentDate) <= calendar.startOfDay(for: now) else { throw ReimbursementError.paymentDateInFuture }
         guard let accountID,
-              try modelContext.fetch(FetchDescriptor<AccountRecord>()).contains(where: { $0.id == accountID && $0.isActive }) else {
+              let account = try modelContext.fetch(FetchDescriptor<AccountRecord>()).first(where: { $0.id == accountID && $0.isActive }) else {
             throw ReimbursementError.accountRequired
         }
+        // A cash box cannot pay out more than it holds; manual expenses and transfers already refuse this.
+        try HoldingAccountPolicy.validate(
+            account: account,
+            transactions: try modelContext.fetch(FetchDescriptor<LedgerTransaction>()),
+            editing: nil,
+            direction: .expense,
+            amountCents: request.amountCents
+        )
         switch PeriodLocking.validatePosting(
             accountID: accountID,
             date: paymentDate,
@@ -482,8 +496,10 @@ enum ReimbursementService {
     ) throws {
         guard request.status == .approved else { throw ReimbursementError.requestNotApproved }
         guard request.linkedTransactionID == nil else { throw ReimbursementError.transactionAlreadyLinked }
-        guard let transactionID,
-              let transaction = try modelContext.fetch(FetchDescriptor<LedgerTransaction>()).first(where: { $0.id == transactionID }) else {
+        guard let transactionID else { throw ReimbursementError.transactionNotFound }
+        var oneTransaction = FetchDescriptor<LedgerTransaction>(predicate: #Predicate { $0.id == transactionID })
+        oneTransaction.fetchLimit = 1
+        guard let transaction = try modelContext.fetch(oneTransaction).first else {
             throw ReimbursementError.transactionNotFound
         }
         guard transaction.direction == .expense, transaction.amountCents == request.amountCents else {
@@ -521,6 +537,12 @@ enum ReimbursementService {
         request.reviewerName = ""
         request.reviewNotes = ""
         request.reviewedAt = nil
+        // review() records the approver alongside the decision; an undone decision has no approver yet, and a
+        // later approval with controls disabled must not keep naming the person who declined it.
+        let previousApprover = request.approverNameSnapshot
+        request.approverPersonID = nil
+        request.approverNameSnapshot = ""
+        request.approverHouseholdSnapshot = ""
         request.modifiedAt = date
         AuditLogger.record(
             .edit,
@@ -530,6 +552,7 @@ enum ReimbursementService {
             details: AuditLogger.details([
                 ("Previous decision", previousStatus.rawValue),
                 ("Previous reviewer", previousReviewer),
+                ("Previous approver", previousApprover),
                 ("Previous review notes", previousNotes),
                 ("Reason for reopening", trimmedReason),
             ]),
@@ -568,8 +591,16 @@ enum ReimbursementService {
 
     /// Decodes the image and writes it back without any metadata dictionary (EXIF, GPS, maker notes).
     static func imageWithoutMetadata(_ data: Data, preferPNG: Bool) -> (data: Data, mediaType: String)? {
+        // Decoding with the thumbnail API at full size bakes the EXIF orientation into the pixels. The plain
+        // image decode returned the raw sensor buffer, so every portrait iPhone receipt came out sideways once
+        // the orientation tag was stripped along with the rest of the metadata.
+        let decodeOptions: [CFString: Any] = [
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, decodeOptions as CFDictionary) else {
             return nil
         }
         let type: UTType = preferPNG ? .png : .jpeg

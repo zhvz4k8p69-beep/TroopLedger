@@ -110,10 +110,12 @@ enum ReportingYearBasis: String, CaseIterable, Identifiable, Hashable {
     }
 
     func startingYear(containing date: Date, calendar: Calendar = ReportingPeriod.localCalendar) -> Int {
-        let year = calendar.component(.year, from: date)
+        // One decomposition instead of two; this runs once per transaction when the report year list is built.
+        let components = calendar.dateComponents([.year, .month], from: date)
+        let year = components.year ?? 0
         switch self {
         case .schoolYear:
-            return calendar.component(.month, from: date) >= 9 ? year : year - 1
+            return (components.month ?? 1) >= 9 ? year : year - 1
         case .calendarYear:
             return year
         }
@@ -126,11 +128,13 @@ struct ReportingPeriod: Equatable {
     let startDate: Date
     let endDateExclusive: Date
 
-    static var localCalendar: Calendar {
+    /// Stored rather than computed: this is the default argument on per-transaction paths, and building a
+    /// Calendar plus a time-zone lookup on every call was measurable on large registers.
+    static let localCalendar: Calendar = {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         return calendar
-    }
+    }()
 
     init(basis: ReportingYearBasis, startingYear: Int, calendar: Calendar = localCalendar) {
         let startingMonth = basis == .schoolYear ? 9 : 1
@@ -215,9 +219,29 @@ enum FinanceEngine {
             .reduce(0) { $0 + $1.balanceEffectCents }
     }
 
+    /// Every member's balance in one pass. Rosters and dashboards used to call `memberBalance` per person,
+    /// which rescanned the whole entry list for each row.
+    static func memberBalances(entries: [MemberLedgerEntry]) -> [UUID: Int64] {
+        entries.reduce(into: [:]) { result, entry in
+            guard let personID = entry.personID else { return }
+            result[personID, default: 0] += entry.balanceEffectCents
+        }
+    }
+
+    /// Every account's book balance in one pass over the register.
+    static func bookBalances(accounts: [AccountRecord], transactions: [LedgerTransaction]) -> [UUID: Int64] {
+        var totals = transactions.reduce(into: [UUID: Int64]()) { result, transaction in
+            guard let accountID = transaction.accountID else { return }
+            result[accountID, default: 0] += transaction.signedAmountCents
+        }
+        for account in accounts { totals[account.id, default: 0] += account.openingBalanceCents }
+        return totals
+    }
+
     static func cashPosition(accounts: [AccountRecord], transactions: [LedgerTransaction]) -> CashPosition {
+        let balanceByAccount = bookBalances(accounts: accounts, transactions: transactions)
         let balances = accounts.map { account in
-            (account: account, balance: bookBalance(account: account, transactions: transactions))
+            (account: account, balance: balanceByAccount[account.id] ?? account.openingBalanceCents)
         }
         // An archived account can still hold historical cash. Keep it in reports until its balance is zero.
         let reportable = balances.filter { $0.account.isActive || $0.balance != 0 }
@@ -230,7 +254,7 @@ enum FinanceEngine {
         return CashPosition(bankAndCashOnHandCents: bankAndCash, undepositedFundsCents: undeposited)
     }
 
-    static func annualReport(year: Int, transactions: [LedgerTransaction], calendar: Calendar = .current) -> AnnualReport {
+    static func annualReport(year: Int, transactions: [LedgerTransaction], calendar: Calendar = ReportingPeriod.localCalendar) -> AnnualReport {
         annualReport(
             period: ReportingPeriod(basis: .calendarYear, startingYear: year, calendar: calendar),
             transactions: transactions
@@ -246,8 +270,13 @@ enum FinanceEngine {
     }
 
     private static func totals(for transactions: [LedgerTransaction]) -> [CategoryTotal] {
-        Dictionary(grouping: transactions, by: { $0.category.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Uncategorized" : $0.category })
-            .map { CategoryTotal(category: $0.key, amountCents: $0.value.reduce(0) { $0 + $1.amountCents }) }
+        // Group on the same folded key the budget variance report uses, so "Dues", " Dues" and "dues" are one
+        // line here as well instead of three rows sitting above a single budget line.
+        Dictionary(grouping: transactions, by: { CategoryCatalog.key(name: $0.category, direction: $0.direction) })
+            .map { _, group in
+                let name = group[0].category.trimmingCharacters(in: .whitespacesAndNewlines)
+                return CategoryTotal(category: name.isEmpty ? "Uncategorized" : name, amountCents: group.reduce(0) { $0 + $1.amountCents })
+            }
             .sorted {
                 if $0.amountCents == $1.amountCents { return $0.category.localizedCaseInsensitiveCompare($1.category) == .orderedAscending }
                 return $0.amountCents > $1.amountCents
@@ -326,9 +355,21 @@ enum HoldingAccountPolicy {
         direction: TransactionDirection,
         amountCents: Int64
     ) throws {
-        guard account.kind == .cash || account.kind == .undepositedFunds, direction == .expense else { return }
+        guard account.kind == .cash || account.kind == .undepositedFunds else { return }
+        // Shrinking or re-directing an existing receipt can overdraw the box just as a new expense can, so the
+        // projection is computed for both directions rather than only for expenses.
         let others = transactions.filter { $0.id != editedTransactionID }
-        let projected = FinanceEngine.bookBalance(account: account, transactions: others) - amountCents
+        let delta: Int64 = direction == .income ? amountCents : -amountCents
+        let projected = FinanceEngine.bookBalance(account: account, transactions: others) + delta
+        if projected < 0 {
+            throw HoldingAccountValidationError.wouldOverdraw(accountName: account.name, shortfallCents: -projected)
+        }
+    }
+
+    /// Deleting a receipt, or moving it to another account, must not leave the account it came from negative.
+    static func validateRemoval(of transaction: LedgerTransaction, from account: AccountRecord, transactions: [LedgerTransaction]) throws {
+        guard account.kind == .cash || account.kind == .undepositedFunds else { return }
+        let projected = FinanceEngine.bookBalance(account: account, transactions: transactions.filter { $0.id != transaction.id })
         if projected < 0 {
             throw HoldingAccountValidationError.wouldOverdraw(accountName: account.name, shortfallCents: -projected)
         }
@@ -448,6 +489,22 @@ enum PeriodLocking {
         )
     }
 
+    /// The latest lock date per account, computed once so a register of thousands of rows does not rescan
+    /// every reconciliation for each row it draws.
+    static func lockDates(reconciliations: [ReconciliationRecord], calendar: Calendar = .current) -> [UUID: Date] {
+        reconciliations.reduce(into: [:]) { result, reconciliation in
+            guard let accountID = reconciliation.accountID else { return }
+            let day = calendar.startOfDay(for: reconciliation.statementDate)
+            if let existing = result[accountID], existing >= day { return }
+            result[accountID] = day
+        }
+    }
+
+    static func isLocked(_ transaction: LedgerTransaction, lockDates: [UUID: Date], calendar: Calendar = .current) -> Bool {
+        guard let accountID = transaction.accountID, let lockDate = lockDates[accountID] else { return false }
+        return calendar.startOfDay(for: transaction.date) <= lockDate
+    }
+
     static func firstUnlockedDate(
         for accountID: UUID?,
         reconciliations: [ReconciliationRecord],
@@ -551,13 +608,27 @@ enum Money {
         cents >= -maximumCents && cents <= maximumCents
     }
 
-    static func cents(from text: String) -> Int64? {
+    /// Built once: `cents(from:)` runs from `canSave` on every keystroke of every money field, and a fresh
+    /// NumberFormatter costs an ICU formatter plus locale data each time. NumberFormatter is safe to share
+    /// for non-mutating use.
+    nonisolated(unsafe) private static let parsingFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         formatter.locale = .current
+        formatter.generatesDecimalNumbers = true
+        return formatter
+    }()
+
+    private static let currencySymbols: Set<String> = {
+        let formatter = parsingFormatter
+        return Set(["$", Locale.current.currencySymbol ?? "$", formatter.currencySymbol ?? "$"]).filter { !$0.isEmpty }
+    }()
+
+    static func cents(from text: String) -> Int64? {
+        let formatter = parsingFormatter
         // Treasurers type what a bank statement shows: "$1,250.00". Strip the currency symbol before parsing.
         var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        for symbol in Set(["$", Locale.current.currencySymbol ?? "$", formatter.currencySymbol ?? "$"]) where !symbol.isEmpty {
+        for symbol in currencySymbols {
             cleaned = cleaned.replacingOccurrences(of: symbol, with: "")
         }
         cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -11,6 +11,7 @@ struct TreasurerReportCenterView: View {
     @Query private var reconciliations: [ReconciliationRecord]
     @Query private var budgets: [OperatingBudgetRecord]
     @Query private var budgetLines: [BudgetLineRecord]
+    @Query private var categories: [LedgerCategoryRecord]
     // The current month is still open; the report that gets presented is last month's.
     @State private var selectedMonth = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
     @State private var pdfDocument: TreasurerReportPDFDocument?
@@ -41,12 +42,15 @@ struct TreasurerReportCenterView: View {
             memberEntries: memberEntries,
             reconciliations: reconciliations,
             budget: budget,
-            budgetLines: budget.map { selected in budgetLines.filter { $0.budgetID == selected.id } } ?? []
+            budgetLines: budget.map { selected in budgetLines.filter { $0.budgetID == selected.id } } ?? [],
+            categories: categories
         )
     }
 
     var body: some View {
-        List {
+        // The snapshot filters the whole register several times; build it once per render, not per row.
+        let report = self.report
+        return List {
             Section {
                 TroopReportHeader(profile: profiles.first, reportTitle: "Monthly Treasurer Report", subtitle: month.0.formatted(.dateTime.month(.wide).year()))
             }

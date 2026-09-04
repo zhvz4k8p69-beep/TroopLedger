@@ -286,7 +286,9 @@ struct FamilyStatementDetailView: View {
     }
 
     var body: some View {
-        List {
+        // The statement is built from every ledger entry; once per render, not once per use.
+        let snapshot = self.snapshot
+        return List {
             Section {
                 TroopReportHeader(
                     profile: troopProfiles.first,

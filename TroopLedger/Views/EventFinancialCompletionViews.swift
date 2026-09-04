@@ -240,8 +240,13 @@ struct EventCloseoutView: View {
         try? EventCloseoutService.makePreview(event: event, participants: allParticipants, people: people, transactions: transactions, financialEntries: financialEntries)
     }
 
+    private var eventHasEnded: Bool {
+        Calendar.current.startOfDay(for: event.endDate) <= Calendar.current.startOfDay(for: Date())
+    }
+
     var body: some View {
-        List {
+        let preview = self.preview
+        return List {
             if let existing {
                 Section("Posted Close-out") {
                     LabeledContent("Closed", value: existing.closedAt.formatted(date: .long, time: .shortened))
@@ -290,12 +295,15 @@ struct EventCloseoutView: View {
                     Text("When enabled, each rostered member receives one balance increase or decrease for the difference between their recorded fee and actual per-participant cost. Guests remain in the close-out without a member-ledger entry.")
                         .font(.footnote).foregroundStyle(.secondary)
                     TextField("Close-out notes", text: $notes, axis: .vertical)
+                    // The service rejects an event that has not ended; do not walk the user through the
+                    // confirmation first.
                     Button("Review & Close Event", systemImage: "lock.fill") { confirming = true }
+                        .disabled(!eventHasEnded)
                 }
             } else {
                 Section { Text("Add a registered, attended, or no-show participant before closing this event.").foregroundStyle(.secondary) }
             }
-            if existing == nil, preview != nil, Calendar.current.startOfDay(for: event.endDate) > Calendar.current.startOfDay(for: Date()) {
+            if existing == nil, preview != nil, !eventHasEnded {
                 Section {
                     Label("This event ends \(event.endDate.formatted(date: .abbreviated, time: .omitted)). It can be closed out once it has ended.", systemImage: "clock")
                         .foregroundStyle(.orange)

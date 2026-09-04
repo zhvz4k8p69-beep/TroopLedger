@@ -39,12 +39,17 @@ enum CategoryCatalog {
         var known = Set(existing.map { key(name: $0.name, direction: $0.direction) })
         var definitions = standardCategories.map { ($0.name, $0.direction, true) }
 
-        let usedDefinitions = transactions.compactMap { transaction -> (String, TransactionDirection, Bool)? in
+        // Dedupe before sorting: the register can hold thousands of rows but only a handful of distinct
+        // categories, and this runs every time a transaction editor opens.
+        var seenKeys = known
+        var uniqueUsed: [(String, TransactionDirection, Bool)] = []
+        for transaction in transactions {
             let name = transaction.category.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { return nil }
-            return (name, transaction.direction, false)
+            guard !name.isEmpty else { continue }
+            guard seenKeys.insert(key(name: name, direction: transaction.direction)).inserted else { continue }
+            uniqueUsed.append((name, transaction.direction, false))
         }
-        .sorted {
+        let usedDefinitions = uniqueUsed.sorted {
             if $0.1.rawValue != $1.1.rawValue { return $0.1.rawValue < $1.1.rawValue }
             return $0.0.localizedStandardCompare($1.0) == .orderedAscending
         }
@@ -72,7 +77,7 @@ enum CategoryCatalog {
                 recordType: "Category Catalog",
                 recordID: nil,
                 summary: "Added \(inserted) missing ledger category definition\(inserted == 1 ? "" : "s")",
-                details: AuditLogger.details([("Categories", insertedNames.joined(separator: "\n"))]),
+                details: AuditLogger.details([("Categories", AuditLogger.truncatedList(insertedNames))]),
                 in: context
             )
             try context.save()
@@ -116,7 +121,8 @@ enum BudgetEngine {
     static func varianceReport(
         period: ReportingPeriod,
         transactions: [LedgerTransaction],
-        budgetLines: [BudgetLineRecord]
+        budgetLines: [BudgetLineRecord],
+        categories: [LedgerCategoryRecord] = []
     ) -> BudgetVarianceReport {
         struct Accumulator {
             var name: String
@@ -125,11 +131,16 @@ enum BudgetEngine {
             var actualCents: Int64 = 0
         }
 
+        // Budget lines snapshot the category name at save time. Resolve through the live category record so a
+        // renamed category keeps its budget and actuals on one line instead of splitting into two.
+        let categoriesByID = Dictionary(categories.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var values: [String: Accumulator] = [:]
         for line in budgetLines {
-            let name = displayCategoryName(line.categoryName)
-            let key = CategoryCatalog.key(name: name, direction: line.direction)
-            var value = values[key] ?? Accumulator(name: name, direction: line.direction)
+            let current = line.categoryID.flatMap { categoriesByID[$0] }
+            let name = displayCategoryName(current?.name ?? line.categoryName)
+            let direction = current?.direction ?? line.direction
+            let key = CategoryCatalog.key(name: name, direction: direction)
+            var value = values[key] ?? Accumulator(name: name, direction: direction)
             value.budgetCents += line.amountCents
             values[key] = value
         }

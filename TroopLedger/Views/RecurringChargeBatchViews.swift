@@ -3,7 +3,6 @@ import SwiftUI
 
 struct RecurringChargeBatchListView: View {
     @Query(sort: \RecurringChargeBatchRecord.postedAt, order: .reverse) private var batches: [RecurringChargeBatchRecord]
-    @Query private var allocations: [RecurringChargeAllocationRecord]
     @State private var showingBuilder = false
 
     var body: some View {
@@ -24,7 +23,8 @@ struct RecurringChargeBatchListView: View {
                                 .foregroundStyle(.orange)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(batch.name).font(.headline)
-                                Text("\(batch.chargeDate.formatted(date: .abbreviated, time: .omitted)) - \(allocationCount(batch.id)) charge\(allocationCount(batch.id) == 1 ? "" : "s") - \(batch.category)")
+                                // The batch stores its allocation count; scanning every allocation twice per row was wasted.
+                                Text("\(batch.chargeDate.formatted(date: .abbreviated, time: .omitted)) - \(batch.allocationCount) charge\(batch.allocationCount == 1 ? "" : "s") - \(batch.category)")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 if !batch.programYear.isEmpty {
@@ -47,9 +47,6 @@ struct RecurringChargeBatchListView: View {
         .sheet(isPresented: $showingBuilder) { RecurringChargeBatchBuilderView() }
     }
 
-    private func allocationCount(_ batchID: UUID) -> Int {
-        allocations.count { $0.batchID == batchID }
-    }
 }
 
 private struct RecurringChargeBatchBuilderView: View {
@@ -336,6 +333,7 @@ private struct RecurringChargeBatchDetailView: View {
             }
 
             Section("Read-only Allocations") {
+                let memberEntryIDs = Set(memberEntries.map(\.id))
                 ForEach(allocations) { allocation in
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
@@ -344,7 +342,7 @@ private struct RecurringChargeBatchDetailView: View {
                             if allocation.registrationID != nil {
                                 Text("Linked to assessed registration dues").font(.caption2).foregroundStyle(.secondary)
                             }
-                            if !memberEntries.contains(where: { $0.id == allocation.memberEntryID }) {
+                            if allocation.memberEntryID.map({ memberEntryIDs.contains($0) }) != true {
                                 Label("Generated member-ledger charge is missing", systemImage: "exclamationmark.triangle")
                                     .font(.caption)
                                     .foregroundStyle(.orange)

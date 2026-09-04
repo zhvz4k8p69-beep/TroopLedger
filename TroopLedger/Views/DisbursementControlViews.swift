@@ -251,6 +251,7 @@ struct TroopProfileSettingsView: View {
             profile.unitPhone = clean(unitPhone)
             profile.website = clean(website)
             profile.treasurerName = clean(treasurerName)
+            AuditLogger.invalidateTreasurerIdentity()
             profile.treasurerPreferredName = clean(treasurerPreferredName)
             profile.treasurerTitle = clean(treasurerTitle)
             profile.treasurerEmail = clean(treasurerEmail)

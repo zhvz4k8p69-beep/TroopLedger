@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 import SwiftData
 
 struct ScoutbookCalendarEvent: Equatable, Sendable {
@@ -126,18 +127,26 @@ enum ScoutbookCalendarService {
         let lines = unfoldLines(text)
         var rawEvents: [[String: (value: String, parameters: [String: String])]] = []
         var current: [String: (value: String, parameters: [String: String])]?
+        var nestedDepth = 0
 
         for line in lines {
-            if line.uppercased() == "BEGIN:VEVENT" {
+            let upper = line.uppercased()
+            if upper == "BEGIN:VEVENT" {
                 current = [:]
+                nestedDepth = 0
                 continue
             }
-            if line.uppercased() == "END:VEVENT" {
+            if upper == "END:VEVENT" {
                 if let current { rawEvents.append(current) }
                 current = nil
                 continue
             }
-            guard current != nil, let colon = line.firstIndex(of: ":") else { continue }
+            guard current != nil else { continue }
+            // A VALARM inside the event carries its own DESCRIPTION and SUMMARY ("This is an event reminder");
+            // those must not replace the event's.
+            if upper.hasPrefix("BEGIN:") { nestedDepth += 1; continue }
+            if upper.hasPrefix("END:") { nestedDepth = max(0, nestedDepth - 1); continue }
+            guard nestedDepth == 0, let colon = propertyValueSeparator(in: line) else { continue }
             let left = String(line[..<colon])
             let value = String(line[line.index(after: colon)...])
             let pieces = left.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
@@ -207,13 +216,23 @@ enum ScoutbookCalendarService {
 
     @MainActor
     static func sync(subscription: ExternalCalendarSubscription, into modelContext: ModelContext) async throws -> CalendarSyncResult {
-        // Persist unrelated pending edits first so a failed sync can roll back only its own partial writes.
+        // The download can take up to two minutes while the user keeps editing on the same context. Nothing
+        // below touches the store until it finishes, and the edits made meanwhile are committed before the
+        // transactional section, so the rollback on failure undoes only this sync's own writes.
+        let feedEvents: [ScoutbookCalendarEvent]
+        do {
+            feedEvents = try await fetch(url: try validatedURL(subscription.feedURLString))
+        } catch {
+            if !subscription.isDeleted {
+                subscription.lastError = error.localizedDescription
+                try? modelContext.save()
+            }
+            throw error
+        }
+        // The user may have deleted the subscription while the download was in flight.
+        guard !subscription.isDeleted else { throw ScoutbookCalendarError.subscriptionRemoved }
         if modelContext.hasChanges { try modelContext.save() }
         do {
-            let url = try validatedURL(subscription.feedURLString)
-            let feedEvents = try await fetch(url: url)
-            // The user may have deleted the subscription while the download was in flight.
-            guard !subscription.isDeleted else { throw ScoutbookCalendarError.subscriptionRemoved }
             let result = try apply(feedEvents: feedEvents, to: subscription, in: modelContext)
 
             subscription.lastSyncedAt = Date()
@@ -435,19 +454,47 @@ enum ScoutbookCalendarService {
         return TimeZone(identifier: trimmed) ?? windowsTimeZones[trimmed].flatMap(TimeZone.init(identifier:))
     }
 
+    /// The first ":" outside double quotes; RFC 5545 allows ":" inside a quoted parameter value such as
+    /// `TZID="(UTC-05:00) Eastern Time (US & Canada)"`, which Exchange feeds emit.
+    private static func propertyValueSeparator(in line: String) -> String.Index? {
+        var inQuotes = false
+        for index in line.indices {
+            switch line[index] {
+            case "\"": inQuotes.toggle()
+            case ":" where !inQuotes: return index
+            default: break
+            }
+        }
+        return nil
+    }
+
+    /// Cached by format and zone: DTSTART, DTEND, LAST-MODIFIED, RECURRENCE-ID, UNTIL and every EXDATE of
+    /// every event each built a fresh DateFormatter. Two subscriptions may parse concurrently, hence the lock.
+    private static let formatterCache = OSAllocatedUnfairLock<[String: DateFormatter]>(initialState: [:])
+
+    private static func formatter(_ format: String, timeZone: TimeZone) -> DateFormatter {
+        let key = "\(format)|\(timeZone.identifier)"
+        return formatterCache.withLock { cache in
+            if let cached = cache[key] { return cached }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.timeZone = timeZone
+            formatter.dateFormat = format
+            cache[key] = formatter
+            return formatter
+        }
+    }
+
     private static func parseDate(_ value: String, parameters: [String: String]) -> (date: Date, isDateOnly: Bool)? {
         let isDateOnly = parameters["VALUE"]?.uppercased() == "DATE" || (value.count == 8 && !value.contains("T"))
         let timeZone = parameters["TZID"].flatMap(timeZone(forTZID:)) ?? .current
         let formats = isDateOnly
             ? ["yyyyMMdd"]
             : value.hasSuffix("Z") ? ["yyyyMMdd'T'HHmmss'Z'", "yyyyMMdd'T'HHmm'Z'"] : ["yyyyMMdd'T'HHmmss", "yyyyMMdd'T'HHmm"]
+        let zone = value.hasSuffix("Z") ? (TimeZone(secondsFromGMT: 0) ?? timeZone) : timeZone
         for format in formats {
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.calendar = Calendar(identifier: .gregorian)
-            formatter.timeZone = value.hasSuffix("Z") ? TimeZone(secondsFromGMT: 0) : timeZone
-            formatter.dateFormat = format
-            if let date = formatter.date(from: value) { return (date, isDateOnly) }
+            if let date = formatter(format, timeZone: zone).date(from: value) { return (date, isDateOnly) }
         }
         return nil
     }

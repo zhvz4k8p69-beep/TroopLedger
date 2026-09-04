@@ -372,11 +372,17 @@ private extension Array where Element: PersistentModel & Identifiable, Element.I
     }
 }
 
-private func backupISO8601String(from date: Date) -> String {
+/// One shared formatter: every date cell of every table went through a fresh ISO8601DateFormatter, and a
+/// register of ten thousand transactions carries three dates each. ISO8601DateFormatter is thread-safe.
+nonisolated(unsafe) private let backupISO8601Formatter: ISO8601DateFormatter = {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     formatter.timeZone = TimeZone(secondsFromGMT: 0)
-    return formatter.string(from: date)
+    return formatter
+}()
+
+private func backupISO8601String(from date: Date) -> String {
+    backupISO8601Formatter.string(from: date)
 }
 
 /// Shared RFC 4180 field encoding for every CSV the app exports.

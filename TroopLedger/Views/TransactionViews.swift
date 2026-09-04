@@ -22,14 +22,16 @@ struct TransactionListView: View {
 
     private var filtered: [LedgerTransaction] {
         guard !searchText.isEmpty else { return transactions }
+        // Formatting every amount twice per keystroke is wasted when the query cannot match a number.
+        let searchesAmount = searchText.contains { $0.isNumber }
         return transactions.filter {
             $0.payee.localizedCaseInsensitiveContains(searchText) ||
             $0.memo.localizedCaseInsensitiveContains(searchText) ||
             $0.category.localizedCaseInsensitiveContains(searchText) ||
             $0.checkNumber.localizedCaseInsensitiveContains(searchText) ||
             $0.adjustmentReason.localizedCaseInsensitiveContains(searchText) ||
-            Money.editableString(cents: $0.amountCents).contains(searchText) ||
-            Money.currency(cents: $0.amountCents).contains(searchText)
+            (searchesAmount && (Money.editableString(cents: $0.amountCents).contains(searchText) ||
+                                Money.currency(cents: $0.amountCents).contains(searchText)))
         }
     }
 
@@ -49,21 +51,28 @@ struct TransactionListView: View {
 
     private var depositedReceiptIDs: Set<UUID> { Set(depositAllocations.compactMap(\.sourceCashReceiptID)) }
 
-    private var reportableAccounts: [AccountRecord] {
-        accounts.filter { $0.isActive || FinanceEngine.bookBalance(account: $0, transactions: transactions) != 0 }
-    }
-
-    private var bookBalance: Int64 {
-        reportableAccounts.reduce(0) {
-            $0 + FinanceEngine.bookBalance(account: $1, transactions: transactions)
+    /// One pass over the register for both summary figures; the per-account helpers rescanned every
+    /// transaction for each account, several times per render, on every search keystroke.
+    private var summaryBalances: (book: Int64, cleared: Int64) {
+        var book: [UUID: Int64] = [:]
+        var cleared: [UUID: Int64] = [:]
+        for transaction in transactions {
+            guard let accountID = transaction.accountID else { continue }
+            let amount = transaction.signedAmountCents
+            book[accountID, default: 0] += amount
+            if transaction.isCleared { cleared[accountID, default: 0] += amount }
+        }
+        return accounts.reduce(into: (Int64(0), Int64(0))) { totals, account in
+            let bookBalance = account.openingBalanceCents + (book[account.id] ?? 0)
+            guard account.isActive || bookBalance != 0 else { return }
+            totals.0 += bookBalance
+            totals.1 += account.openingBalanceCents + (cleared[account.id] ?? 0)
         }
     }
 
-    private var clearedBalance: Int64 {
-        reportableAccounts.reduce(0) {
-            $0 + FinanceEngine.clearedBalance(account: $1, transactions: transactions)
-        }
-    }
+    private var bookBalance: Int64 { summaryBalances.book }
+
+    private var clearedBalance: Int64 { summaryBalances.cleared }
 
     /// Only bank-type accounts clear against statements; cash and Undeposited Funds entries never do.
     private var bankAccountIDs: Set<UUID> {
@@ -80,7 +89,8 @@ struct TransactionListView: View {
         content
         .pageToolbar(title: "Transactions") {
             Button("Transfer", systemImage: "arrow.left.arrow.right") { showingTransfer = true }
-                .disabled(accounts.filter(\.isActive).count < 2 || presentation != .bankRegister)
+                // The transfer form excludes Undeposited Funds, so it needs two other active accounts.
+                .disabled(accounts.filter { $0.isActive && $0.kind != .undepositedFunds }.count < 2 || presentation != .bankRegister)
             Button("Add Transaction", systemImage: "plus") { showingNewTransaction = true }
                 .buttonStyle(.fieldbookProminent)
                 .disabled(accounts.isEmpty || presentation != .bankRegister)
@@ -151,9 +161,10 @@ struct TransactionListView: View {
                 EmptyMessage(title: "No transactions", message: accounts.isEmpty ? "Add an account first, then enter deposits and expenses." : "Enter the first deposit or expense.", systemImage: "list.bullet.rectangle")
             } else {
                 List {
+                    let protection = protectionIndex
                     ForEach(filtered) { transaction in
-                        let isLocked = PeriodLocking.isLocked(transaction, reconciliations: reconciliations)
-                        let isBatchProtected = transactionIsProtected(transaction)
+                        let isLocked = protection.isLocked(transaction)
+                        let isBatchProtected = protection.isProtected(transaction)
                         Button { transactionToEdit = transaction } label: {
                             TransactionRow(
                                 transaction: transaction,
@@ -269,9 +280,10 @@ struct TransactionListView: View {
             registerHeader
             Divider()
             ScrollView {
+                let protection = protectionIndex
                 LazyVStack(spacing: 0) {
                     ForEach(filtered) { transaction in
-                        registerRow(transaction)
+                        registerRow(transaction, protection: protection)
                         Divider()
                     }
                 }
@@ -295,9 +307,9 @@ struct TransactionListView: View {
         .background(.regularMaterial)
     }
 
-    private func registerRow(_ transaction: LedgerTransaction) -> some View {
+    private func registerRow(_ transaction: LedgerTransaction, protection: TransactionProtectionIndex) -> some View {
         let isSelected = selectedTransactionID == transaction.id
-        let isLocked = PeriodLocking.isLocked(transaction, reconciliations: reconciliations)
+        let isLocked = protection.isLocked(transaction)
         return Button {
             selectedTransactionID = transaction.id
         } label: {
@@ -467,23 +479,34 @@ struct TransactionListView: View {
         return "Editable"
     }
 
+    /// Built once per render. Each row's `deleteDisabled` used to rescan the register, the deposit tables,
+    /// the reimbursements, and the member ledger, so a long register did quadratic work on every keystroke.
+    private var protectionIndex: TransactionProtectionIndex {
+        var referenced = Set(transactions.compactMap(\.adjustsTransactionID))
+        referenced.formUnion(depositAllocations.compactMap(\.sourceTransactionID))
+        referenced.formUnion(depositBatches.flatMap { [$0.holdingTransactionID, $0.bankTransactionID].compactMap { $0 } })
+        referenced.formUnion(reimbursements.compactMap(\.linkedTransactionID))
+        referenced.formUnion(memberEntries.compactMap(\.accountTransactionID))
+        return TransactionProtectionIndex(referenced: referenced, lockDates: PeriodLocking.lockDates(reconciliations: reconciliations))
+    }
+
     private func transactionIsProtected(_ transaction: LedgerTransaction) -> Bool {
-        transaction.isTransfer ||
-        !RecordDeletionPolicy.canDeleteTransaction(
-            transaction.id,
-            transactions: transactions,
-            depositAllocations: depositAllocations,
-            depositBatches: depositBatches,
-            reimbursements: reimbursements,
-            memberEntries: memberEntries
-        ) ||
-        PeriodLocking.isLocked(transaction, reconciliations: reconciliations)
+        protectionIndex.isProtected(transaction)
     }
 
     private func deleteTransaction(_ transaction: LedgerTransaction) {
         guard !transactionIsProtected(transaction) else {
             deletionMessage = "This transaction is locked or referenced by a deposit, reimbursement, member-ledger entry, or adjustment and cannot be deleted."
             return
+        }
+        // Removing a receipt from a cash box must not leave it holding less than it has paid out.
+        if let account = accounts.first(where: { $0.id == transaction.accountID }) {
+            do {
+                try HoldingAccountPolicy.validateRemoval(of: transaction, from: account, transactions: transactions)
+            } catch {
+                deletionMessage = error.localizedDescription
+                return
+            }
         }
         AuditLogger.record(
             .delete,
@@ -729,6 +752,7 @@ private struct TransactionEditorView: View {
     @State private var adjustmentReason: String
     @State private var preparedAdjustmentDate = false
     @State private var errorMessage: String?
+    @State private var isSaving = false
 
     /// True when another money record (a paid reimbursement or a member payment) points at this entry.
     private var isLinkedMoneyRecord: Bool {
@@ -875,7 +899,7 @@ private struct TransactionEditorView: View {
             .navigationTitle(navigationTitle)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(!canSave) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(!canSave || isSaving) }
             }
             .onAppear(perform: prepareDefaults)
         }
@@ -955,10 +979,23 @@ private struct TransactionEditorView: View {
     }
 
     private func save() {
-        guard canSave, let cents = Money.cents(from: amount), cents > 0 else { return }
+        // A second click during the animated dismissal re-entered save() and inserted the transaction twice.
+        guard !isSaving, canSave, let cents = Money.cents(from: amount), cents > 0 else { return }
+        isSaving = true
+        defer { if errorMessage != nil { isSaving = false } }
         if let account = accounts.first(where: { $0.id == accountID }) {
             do {
                 try HoldingAccountPolicy.validate(account: account, transactions: allTransactions, editing: transaction?.id, direction: direction, amountCents: cents)
+            } catch {
+                errorMessage = error.localizedDescription
+                return
+            }
+        }
+        // Moving a receipt out of a cash box is a removal from that box and is checked the same way.
+        if let transaction, let previousAccountID = transaction.accountID, previousAccountID != accountID,
+           let previousAccount = accounts.first(where: { $0.id == previousAccountID }) {
+            do {
+                try HoldingAccountPolicy.validateRemoval(of: transaction, from: previousAccount, transactions: allTransactions)
             } catch {
                 errorMessage = error.localizedDescription
                 return
@@ -1019,6 +1056,20 @@ private struct TransactionEditorView: View {
         } catch {
             errorMessage = "The transaction could not be saved: \(error.localizedDescription)"
         }
+    }
+}
+
+/// Everything the register needs to decide whether a row may be edited or deleted, computed once per render.
+struct TransactionProtectionIndex {
+    let referenced: Set<UUID>
+    let lockDates: [UUID: Date]
+
+    func isLocked(_ transaction: LedgerTransaction) -> Bool {
+        PeriodLocking.isLocked(transaction, lockDates: lockDates)
+    }
+
+    func isProtected(_ transaction: LedgerTransaction) -> Bool {
+        transaction.isTransfer || referenced.contains(transaction.id) || isLocked(transaction)
     }
 }
 

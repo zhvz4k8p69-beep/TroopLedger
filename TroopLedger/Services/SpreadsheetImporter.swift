@@ -197,7 +197,10 @@ enum SpreadsheetImporter {
             for source in snapshot.accounts {
                 let record = AccountRecord(name: source.name, institution: source.institution, kind: AccountKind(rawValue: source.kind) ?? .other, openingBalanceCents: source.openingBalanceCents)
                 record.id = source.id
-                record.notes = [source.notes, source.openingDate.map { "Opening date: \($0.formatted(date: .abbreviated, time: .omitted))." }].compactMap { $0 }.joined(separator: "\n")
+                record.notes = [source.notes, source.openingDate.map { "Opening date: \($0.formatted(date: .abbreviated, time: .omitted))." }]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
                 modelContext.insert(record)
             }
 

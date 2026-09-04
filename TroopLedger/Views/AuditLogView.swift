@@ -6,11 +6,20 @@ import SwiftData
 struct AuditHistoryView: View {
     let recordID: UUID
     let title: String
-    @Query(sort: \AuditLogEntry.timestamp, order: .reverse) private var entries: [AuditLogEntry]
+    @Query private var related: [AuditLogEntry]
 
-    private var related: [AuditLogEntry] {
+    init(recordID: UUID, title: String) {
+        self.recordID = recordID
+        self.title = title
+        // Filter in the store. This screen is reachable from every record, and it used to load the entire
+        // audit log and substring-search every row's details on each render.
+        let id: UUID? = recordID
         let text = recordID.uuidString
-        return entries.filter { $0.recordID == recordID || $0.details.localizedCaseInsensitiveContains(text) }
+        _related = Query(
+            filter: #Predicate<AuditLogEntry> { $0.recordID == id || $0.details.localizedStandardContains(text) },
+            sort: \AuditLogEntry.timestamp,
+            order: .reverse
+        )
     }
 
     var body: some View {

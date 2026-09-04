@@ -66,17 +66,29 @@ enum ReimbursementApprovalReportService {
         attachments: [ReimbursementAttachment],
         transactions: [LedgerTransaction],
         people: [PersonRecord],
+        families: [FamilyRecord] = [],
         auditEntries: [AuditLogEntry],
         policy: DisbursementControlPolicy,
         generatedAt: Date = Date()
     ) -> ReimbursementApprovalReport {
         let peopleByID = Dictionary(people.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let familyNamesByID = Dictionary(families.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        // Indexed once: the per-request audit scan used to walk the whole log with a locale-aware substring
+        // search for every request, and the view evaluates this report several times per render.
+        let auditByRecordID = Dictionary(grouping: auditEntries.filter { $0.recordID != nil }, by: { $0.recordID! })
+        let auditMentions = auditEntries.map { (entry: $0, details: $0.details.lowercased()) }
         let transactionsByID = Dictionary(transactions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let receiptCounts = Dictionary(grouping: attachments.compactMap { attachment in
             attachment.requestID.map { ($0, attachment) }
         }, by: \.0).mapValues(\.count)
 
-        let rows = requests.sorted { $0.submittedAt > $1.submittedAt }.map { request in
+        // Tiebreak on id so two requests entered in the same second export in a stable order; otherwise two
+        // runs over the same data produce different CSV bytes and different package manifest hashes.
+        let sortedRequests = requests.sorted { left, right in
+            if left.submittedAt != right.submittedAt { return left.submittedAt > right.submittedAt }
+            return left.id.uuidString < right.id.uuidString
+        }
+        let rows = sortedRequests.map { request -> ReimbursementApprovalReportRow in
             var issues: [ReimbursementApprovalIssue] = []
             let receiptCount = receiptCounts[request.id] ?? 0
 
@@ -97,7 +109,7 @@ enum ReimbursementApprovalReportService {
                         signerOne: request.controlIdentity(for: .signerOne),
                         signerTwo: request.controlIdentity(for: .signerTwo),
                         policy: policy,
-                        requester: requesterIdentity(for: request, peopleByID: peopleByID)
+                        requester: requesterIdentity(for: request, peopleByID: peopleByID, familyNamesByID: familyNamesByID)
                     )
                     for warning in controlAssessment.warnings {
                         let kind: ReimbursementApprovalIssueKind = warning.hasPrefix("No approver") || warning.hasPrefix("Approver") ? .approval : .signer
@@ -124,7 +136,8 @@ enum ReimbursementApprovalReportService {
                         request: request,
                         requesterName: requesterName(for: request, peopleByID: peopleByID),
                         receiptCount: receiptCount,
-                        auditEntries: auditEntries,
+                        auditByRecordID: auditByRecordID,
+                        auditMentions: auditMentions,
                         issues: issues
                     )
                 }
@@ -147,7 +160,8 @@ enum ReimbursementApprovalReportService {
                 request: request,
                 requesterName: requesterName(for: request, peopleByID: peopleByID),
                 receiptCount: receiptCount,
-                auditEntries: auditEntries,
+                auditByRecordID: auditByRecordID,
+                auditMentions: auditMentions,
                 issues: issues
             )
         }
@@ -197,13 +211,14 @@ enum ReimbursementApprovalReportService {
         request: ReimbursementRequest,
         requesterName: String,
         receiptCount: Int,
-        auditEntries: [AuditLogEntry],
+        auditByRecordID: [UUID: [AuditLogEntry]],
+        auditMentions: [(entry: AuditLogEntry, details: String)],
         issues: [ReimbursementApprovalIssue]
     ) -> ReimbursementApprovalReportRow {
-        let requestID = request.id.uuidString
-        let relatedAudit = auditEntries.filter { entry in
-            entry.recordID == request.id || entry.details.localizedCaseInsensitiveContains(requestID)
-        }
+        let requestID = request.id
+        let needle = requestID.uuidString.lowercased()
+        let relatedAudit = (auditByRecordID[requestID] ?? [])
+            + auditMentions.filter { $0.entry.recordID != requestID && $0.details.contains(needle) }.map(\.entry)
         return ReimbursementApprovalReportRow(
             requestID: request.id,
             requesterName: requesterName,
@@ -228,13 +243,21 @@ enum ReimbursementApprovalReportService {
         request.requesterPersonID.flatMap { peopleByID[$0]?.displayName } ?? "Unknown requester"
     }
 
-    private static func requesterIdentity(for request: ReimbursementRequest, peopleByID: [UUID: PersonRecord]) -> DisbursementControlIdentity? {
+    private static func requesterIdentity(
+        for request: ReimbursementRequest,
+        peopleByID: [UUID: PersonRecord],
+        familyNamesByID: [UUID: String]
+    ) -> DisbursementControlIdentity? {
         guard let requesterID = request.requesterPersonID else { return nil }
-        return DisbursementControlIdentity(personID: requesterID, name: peopleByID[requesterID]?.displayName ?? "", household: "")
+        // The live disbursement-control screen compares households by family name; the exported report must
+        // evaluate the same rule or the audit package omits the very conflict the screen warns about.
+        let person = peopleByID[requesterID]
+        let household = person?.familyID.flatMap { familyNamesByID[$0] } ?? ""
+        return DisbursementControlIdentity(personID: requesterID, name: person?.displayName ?? "", household: household)
     }
 
     private static func dateString(_ date: Date) -> String {
-        ISO8601DateFormatter().string(from: date)
+        date.formatted(.iso8601)
     }
 
     private static func csvField(_ value: String) -> String {

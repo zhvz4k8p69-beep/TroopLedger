@@ -546,14 +546,16 @@ struct EventDetailView: View {
     private var transactions: [LedgerTransaction] { allTransactions.filter { $0.eventID == event.id } }
     private var eventEntries: [EventFinancialEntry] { allEventEntries.filter { $0.eventID == event.id } }
     private var participants: [EventParticipant] { allParticipants.filter { $0.eventID == event.id } }
-    private var actualIncome: Int64 {
-        if !eventEntries.isEmpty { return eventEntries.filter { !$0.isProjected && $0.direction == .income }.reduce(0) { $0 + $1.amountCents } }
-        return transactions.filter { $0.direction == .income }.reduce(0) { $0 + $1.amountCents }
+    /// Same rule as the event list and the close-out service: imported actuals win only when there are
+    /// non-projected entries. Deciding on "any entries" showed $0.00 for a worksheet of projections whose real
+    /// money lived in linked ledger transactions.
+    private func actualTotal(_ direction: TransactionDirection) -> Int64 {
+        let actuals = eventEntries.filter { !$0.isProjected }
+        if !actuals.isEmpty { return actuals.filter { $0.direction == direction }.reduce(0) { $0 + $1.amountCents } }
+        return transactions.filter { $0.direction == direction && !$0.isTransfer }.reduce(0) { $0 + $1.amountCents }
     }
-    private var actualExpense: Int64 {
-        if !eventEntries.isEmpty { return eventEntries.filter { !$0.isProjected && $0.direction == .expense }.reduce(0) { $0 + $1.amountCents } }
-        return transactions.filter { $0.direction == .expense }.reduce(0) { $0 + $1.amountCents }
-    }
+    private var actualIncome: Int64 { actualTotal(.income) }
+    private var actualExpense: Int64 { actualTotal(.expense) }
 
     var body: some View {
         List {

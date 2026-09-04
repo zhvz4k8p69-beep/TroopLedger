@@ -78,9 +78,23 @@ enum ScoutsBSARank: String, CaseIterable, Identifiable, Codable {
     }
 
     static func matching(_ value: String) -> ScoutsBSARank? {
-        let normalized = value.normalizedScoutingLabel
+        var normalized = value.normalizedScoutingLabel
+        guard !normalized.isEmpty else { return nil }
+        if let alias = aliases[normalized] { return alias }
+        // Scoutbook exports write "Life Scout" and "Eagle Scout"; drop the suffix but leave a bare "Scout" alone.
+        let scoutSuffix = "scout"
+        if normalized.count > scoutSuffix.count, normalized.hasSuffix(scoutSuffix) {
+            normalized.removeLast(scoutSuffix.count)
+        }
         return allCases.first { $0 != .none && $0.displayName.normalizedScoutingLabel == normalized }
     }
+
+    private static let aliases: [String: ScoutsBSARank] = [
+        "1stclass": .firstClass,
+        "2ndclass": .secondClass,
+        "1stclassscout": .firstClass,
+        "2ndclassscout": .secondClass,
+    ]
 }
 
 enum TroopPositionCategory: String, CaseIterable, Identifiable, Codable {

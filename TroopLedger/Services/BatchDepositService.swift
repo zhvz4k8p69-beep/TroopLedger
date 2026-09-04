@@ -42,6 +42,9 @@ enum BatchDepositService {
         transactions: [LedgerTransaction],
         allocations: [DepositAllocationRecord]
     ) -> [LedgerTransaction] {
+        // With no holding account, `nil == nil` matched every account-less receipt and offered rows that
+        // `post` would then reject.
+        guard let undepositedFundsAccountID else { return [] }
         let used = Set(allocations.compactMap(\.sourceTransactionID))
         return transactions.filter {
             $0.accountID == undepositedFundsAccountID
@@ -172,11 +175,14 @@ enum BatchDepositService {
             modelContext.insert(allocation)
         }
 
-        let people = try modelContext.fetch(FetchDescriptor<PersonRecord>())
+        let peopleByNormalizedName = Dictionary(
+            grouping: try modelContext.fetch(FetchDescriptor<PersonRecord>()),
+            by: { normalized($0.displayName) }
+        )
         for receipt in selectedReceipts {
             // A receipt is credited to a person only when exactly one roster record carries that name;
             // two families with the same name must not have money attributed to whichever sorts first.
-            let matches = people.filter { normalized($0.displayName) == normalized(receipt.personName) }
+            let matches = peopleByNormalizedName[normalized(receipt.personName)] ?? []
             let person = matches.count == 1 ? matches.first : nil
             let receiptTransaction = LedgerTransaction(
                 accountID: undeposited.id,

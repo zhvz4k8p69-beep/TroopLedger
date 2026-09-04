@@ -1,50 +1,53 @@
 import LocalAuthentication
+import Observation
 import SwiftUI
 
 /// Optional device lock: when enabled in Preferences, the window blurs and asks for Face ID, Touch ID, or the
 /// device passcode after the app moves to the background, so a shared family iPad or an unattended Mac does
 /// not leave the troop's finances and contact details open.
+@MainActor
 struct AppLockGate: ViewModifier {
     @AppStorage(AppLockPolicy.storageKey) private var requiresAuthentication = false
     @Environment(\.scenePhase) private var scenePhase
-    @State private var isLocked = false
-    @State private var isAuthenticating = false
+    // Shared across windows. Each gate used to keep its own lock state, so opening Preferences on a Mac
+    // re-prompted for Touch ID, and two open windows raced two overlapping prompts after backgrounding.
+    private var lock = AppLockState.shared
     @State private var failureMessage: String?
     @State private var inactiveSince: Date?
 
     func body(content: Content) -> some View {
         content
             // Keyboard shortcuts and menu commands must not reach the books while the overlay is up.
-            .disabled(isLocked)
-            .allowsHitTesting(!isLocked)
+            .disabled(lock.isLocked)
+            .allowsHitTesting(!lock.isLocked)
             .overlay {
-                if isLocked { lockScreen }
+                if lock.isLocked { lockScreen }
             }
             .task(id: inactiveSince) {
                 guard let started = inactiveSince else { return }
                 try? await Task.sleep(for: .seconds(AppLockPolicy.inactivityTimeout))
                 if !Task.isCancelled, AppLockPolicy.shouldLockAfterInactivity(isEnabled: requiresAuthentication, inactiveSince: started) {
-                    isLocked = true
+                    lock.isLocked = true
                 }
             }
             .onAppear {
-                if requiresAuthentication {
-                    isLocked = true
+                if requiresAuthentication, !lock.hasUnlockedThisLaunch, !lock.isLocked {
+                    lock.isLocked = true
                     authenticate()
                 }
             }
             .onChange(of: scenePhase) { _, phase in
                 switch phase {
                 case .background:
-                    if AppLockPolicy.shouldLock(isEnabled: requiresAuthentication, movedToBackground: true, alreadyLocked: isLocked) {
-                        isLocked = true
+                    if AppLockPolicy.shouldLock(isEnabled: requiresAuthentication, movedToBackground: true, alreadyLocked: lock.isLocked) {
+                        lock.isLocked = true
                     }
                 case .inactive:
                     // On a Mac the app rarely reaches .background; an unattended window goes .inactive.
                     if requiresAuthentication, inactiveSince == nil { inactiveSince = Date() }
                 case .active:
                     inactiveSince = nil
-                    if isLocked { authenticate() }
+                    if lock.isLocked { authenticate() }
                 default:
                     break
                 }
@@ -62,30 +65,30 @@ struct AppLockGate: ViewModifier {
                 }
                 Button("Unlock") { authenticate() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(isAuthenticating)
+                    .disabled(lock.isAuthenticating)
             }
             .padding(32)
         }
     }
 
     private func authenticate() {
-        guard !isAuthenticating else { return }
-        isAuthenticating = true
+        guard !lock.isAuthenticating else { return }
+        lock.isAuthenticating = true
         let context = LAContext()
         var availabilityError: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &availabilityError) else {
-            isAuthenticating = false
+            lock.isAuthenticating = false
             failureMessage = availabilityError?.localizedDescription ?? "Device authentication is not available."
             return
         }
-        let locked = $isLocked
-        let authenticating = $isAuthenticating
         let failure = $failureMessage
         context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Unlock the troop's financial records") { success, error in
             Task { @MainActor in
-                authenticating.wrappedValue = false
+                let lock = AppLockState.shared
+                lock.isAuthenticating = false
                 if success {
-                    locked.wrappedValue = false
+                    lock.isLocked = false
+                    lock.hasUnlockedThisLaunch = true
                     failure.wrappedValue = nil
                 } else {
                     failure.wrappedValue = error?.localizedDescription
@@ -95,7 +98,18 @@ struct AppLockGate: ViewModifier {
     }
 }
 
+/// One lock for the whole process; see `AppLockGate`.
+@MainActor
+@Observable
+final class AppLockState {
+    static let shared = AppLockState()
+    var isLocked = false
+    var isAuthenticating = false
+    var hasUnlockedThisLaunch = false
+}
+
 extension View {
+    @MainActor
     func appLockGate() -> some View { modifier(AppLockGate()) }
 }
 

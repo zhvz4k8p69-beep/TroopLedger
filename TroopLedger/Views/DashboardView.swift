@@ -33,9 +33,9 @@ struct DashboardView: View {
     }
     private var cashPosition: CashPosition { FinanceEngine.cashPosition(accounts: accounts, transactions: transactions) }
     private var outstandingMemberBalances: Int64 {
-        people.reduce(0) { partial, person in
-            max(0, FinanceEngine.memberBalance(personID: person.id, entries: memberEntries)) + partial
-        }
+        // One pass over the ledger instead of one full scan per person.
+        let balances = FinanceEngine.memberBalances(entries: memberEntries)
+        return people.reduce(0) { $0 + max(0, balances[$1.id] ?? 0) }
     }
     /// Only bank-type accounts clear against a statement. Cash on Hand and Undeposited Funds entries
     /// (including every deposit batch's holding leg) never "clear", so counting them made the monthly

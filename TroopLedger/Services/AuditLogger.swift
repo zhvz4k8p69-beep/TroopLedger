@@ -39,12 +39,41 @@ struct AuditIdentity: Equatable {
 #endif
         var buffer = [CChar](repeating: 0, count: 256)
         guard gethostname(&buffer, buffer.count) == 0 else { return "" }
-        return String(cString: buffer)
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
     }()
 }
 
 @MainActor
 enum AuditLogger {
+    /// The treasurer-name fallback used to run a store fetch on every audit write on iOS. The name only
+    /// changes when the troop profile is saved, so it is cached per container and cleared by the profile editor.
+    private static var cachedTreasurerIdentity: (container: ObjectIdentifier, value: String)?
+
+    static func invalidateTreasurerIdentity() {
+        cachedTreasurerIdentity = nil
+    }
+
+    private static func treasurerIdentity(in modelContext: ModelContext) -> String {
+        let containerID = ObjectIdentifier(modelContext.container)
+        if let cached = cachedTreasurerIdentity, cached.container == containerID {
+            return cached.value
+        }
+        var descriptor = FetchDescriptor<TroopProfileRecord>(sortBy: [SortDescriptor(\.modifiedAt, order: .reverse)])
+        descriptor.fetchLimit = 1
+        let treasurer = (try? modelContext.fetch(descriptor))?.first?.treasurerName.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let value = treasurer.isEmpty ? "" : "\(treasurer) (troop profile)"
+        cachedTreasurerIdentity = (containerID, value)
+        return value
+    }
+
+    /// Keeps audit `details` bounded when a change touches hundreds of records; the row syncs through
+    /// CloudKit and is re-rendered in the audit log, so a multi-kilobyte string in one field is a cost.
+    static func truncatedList(_ items: [String], limit: Int = 50) -> String {
+        guard items.count > limit else { return items.joined(separator: "\n") }
+        return items.prefix(limit).joined(separator: "\n") + "\n… and \(items.count - limit) more"
+    }
+
     @discardableResult
     static func record(
         _ action: AuditAction,
@@ -60,11 +89,7 @@ enum AuditLogger {
         // profile names the treasurer who owns this database; use that name when the system offers none.
         var userIdentity = identity.userIdentity
         if userIdentity.isEmpty {
-            var descriptor = FetchDescriptor<TroopProfileRecord>(sortBy: [SortDescriptor(\.modifiedAt, order: .reverse)])
-            descriptor.fetchLimit = 1
-            if let treasurer = (try? modelContext.fetch(descriptor))?.first?.treasurerName.trimmingCharacters(in: .whitespacesAndNewlines), !treasurer.isEmpty {
-                userIdentity = "\(treasurer) (troop profile)"
-            }
+            userIdentity = treasurerIdentity(in: modelContext)
         }
         let entry = AuditLogEntry(
             timestamp: timestamp,

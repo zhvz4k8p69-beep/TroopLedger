@@ -259,7 +259,9 @@ private struct BudgetEditorView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        // `canSave` parses every amount field; evaluate it once per keystroke instead of twice.
+        let canSave = self.canSave
+        return NavigationStack {
             Form {
                 Section("School Year") {
                     LabeledContent("Budget", value: budget.reportingPeriod.label)

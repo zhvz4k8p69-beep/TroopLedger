@@ -47,13 +47,6 @@ enum ModelContainerFactory {
         return Result { try ModelContainer(for: schema, configurations: configuration) }
     }
 
-    static func makeCloudContainer() -> ModelContainer {
-        switch openCloudContainer() {
-        case .success(let container): return container
-        case .failure(let error): fatalError("Unable to initialize TroopLedger storage: \(error)")
-        }
-    }
-
     static func makeInMemoryContainer() throws -> ModelContainer {
         let schema = Schema(modelTypes)
         let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)

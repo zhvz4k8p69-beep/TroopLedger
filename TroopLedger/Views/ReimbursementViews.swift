@@ -27,12 +27,14 @@ struct ReimbursementListView: View {
         case .declined: requests.filter { $0.status == .declined }
         }
         guard !searchText.isEmpty else { return byStatus }
+        let names = Dictionary(people.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
+        let searchesAmount = searchText.contains { $0.isNumber }
         return byStatus.filter {
             $0.purpose.localizedCaseInsensitiveContains(searchText)
                 || $0.category.localizedCaseInsensitiveContains(searchText)
                 || $0.paymentReference.localizedCaseInsensitiveContains(searchText)
-                || requesterName(for: $0).localizedCaseInsensitiveContains(searchText)
-                || Money.editableString(cents: $0.amountCents).contains(searchText)
+                || ($0.requesterPersonID.flatMap { names[$0] } ?? "Unknown requester").localizedCaseInsensitiveContains(searchText)
+                || (searchesAmount && Money.editableString(cents: $0.amountCents).contains(searchText))
         }
     }
 
@@ -463,6 +465,8 @@ struct ReimbursementDetailView: View {
         .alert("Reopen this request for review?", isPresented: $showingReopen) {
             TextField("Reason for reopening", text: $reopenReason)
             Button("Reopen", role: .destructive) { reopen() }
+                // The service refuses an empty reason; disabling the button avoids a second alert from inside this one.
+                .disabled(reopenReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             Button("Cancel", role: .cancel) { reopenReason = "" }
         } message: {
             Text("The \(request.status.rawValue.lowercased()) decision will be cleared and the request returned to Submitted.")
@@ -773,15 +777,16 @@ private final class ReceiptPDFLinkBlocker: NSObject, PDFViewDelegate {
 private struct ReceiptPDFView: NSViewRepresentable {
     let data: Data
     func makeCoordinator() -> ReceiptPDFLinkBlocker { ReceiptPDFLinkBlocker() }
+    // The receipt is immutable for the life of the sheet. Re-parsing it in every update reset the reader's
+    // page and zoom whenever the environment changed.
     func makeNSView(context: Context) -> PDFView {
         let view = PDFView()
         view.delegate = context.coordinator
-        return view
-    }
-    func updateNSView(_ view: PDFView, context: Context) {
         view.document = PDFDocument(data: data)
         view.autoScales = true
+        return view
     }
+    func updateNSView(_ view: PDFView, context: Context) {}
 }
 #else
 private struct ReceiptPDFView: UIViewRepresentable {
@@ -790,12 +795,11 @@ private struct ReceiptPDFView: UIViewRepresentable {
     func makeUIView(context: Context) -> PDFView {
         let view = PDFView()
         view.delegate = context.coordinator
-        return view
-    }
-    func updateUIView(_ view: PDFView, context: Context) {
         view.document = PDFDocument(data: data)
         view.autoScales = true
+        return view
     }
+    func updateUIView(_ view: PDFView, context: Context) {}
 }
 
 struct ScannedReceiptPage: Identifiable {

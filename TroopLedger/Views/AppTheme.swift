@@ -205,17 +205,27 @@ private struct TopographicContourMap: View {
     ]
     private let indexLevels: [Double] = [0.34, 0.66, 0.98, 1.30]
 
+    // The elevation field does not depend on the view size, so the contours are traced once in unit space and
+    // scaled per draw. Rebuilding the terrain and walking every cell on each Canvas redraw (every frame of a
+    // window resize) was the single most expensive thing on the page.
+    nonisolated(unsafe) private static let unitTerrain = TopographicTerrain(size: CGSize(width: 1, height: 1))
+    nonisolated(unsafe) private static let minorPath = unitTerrain.contourPath(levels: [
+        0.10, 0.18, 0.26, 0.42, 0.50, 0.58, 0.74,
+        0.82, 0.90, 1.06, 1.14, 1.22, 1.38, 1.46
+    ])
+    nonisolated(unsafe) private static let indexPath = unitTerrain.contourPath(levels: [0.34, 0.66, 0.98, 1.30])
+
     var body: some View {
         Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, size in
-            let terrain = TopographicTerrain(size: size)
+            let transform = CGAffineTransform(scaleX: size.width, y: size.height)
 
             context.stroke(
-                terrain.contourPath(levels: minorLevels),
+                Self.minorPath.applying(transform),
                 with: .color(Color.fieldbookContour.opacity(0.52)),
                 style: StrokeStyle(lineWidth: 0.75, lineCap: .round, lineJoin: .round)
             )
             context.stroke(
-                terrain.contourPath(levels: indexLevels),
+                Self.indexPath.applying(transform),
                 with: .color(Color.fieldbookContour.opacity(0.82)),
                 style: StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round)
             )
@@ -281,8 +291,10 @@ private struct TopographicTerrain {
         return Sample(point: point, elevation: elevations[row * (columns + 1) + column])
     }
 
+    private static let edgeCorners = [(0, 1), (1, 2), (2, 3), (3, 0)]
+
     private func appendSegments(for corners: [Sample], level: Double, to path: inout Path) {
-        let edgeCorners = [(0, 1), (1, 2), (2, 3), (3, 0)]
+        let edgeCorners = Self.edgeCorners
         var intersections: [(edge: Int, point: CGPoint)] = []
 
         for (edge, pair) in edgeCorners.enumerated() {

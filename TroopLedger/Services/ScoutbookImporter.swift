@@ -90,7 +90,9 @@ enum ScoutbookImporter {
 
     static func parse(data: Data, sourceName: String) throws -> ScoutbookCSVDocument {
         guard data.count <= maximumFileBytes else { throw ScoutbookImportError.fileTooLarge }
-        guard let text = decode(data) else { throw ScoutbookImportError.unreadableText }
+        guard let rawText = decode(data) else { throw ScoutbookImportError.unreadableText }
+        // "\r\n" is one Character in Swift; parseTable compares against "\n" and "\r" separately.
+        let text = rawText.replacingOccurrences(of: "\r\n", with: "\n")
         let commaCount = text.prefix(2_000).filter { $0 == "," }.count
         let tabCount = text.prefix(2_000).filter { $0 == "\t" }.count
         let delimiter: Character = tabCount > commaCount ? "\t" : ","
@@ -209,7 +211,7 @@ enum ScoutbookImporter {
 
     @MainActor
     private static func importPeople(_ rows: [ScoutbookCSVRow], kind: ScoutbookCSVKind, into modelContext: ModelContext) throws -> ScoutbookImportResult {
-        var people = try modelContext.fetch(FetchDescriptor<PersonRecord>())
+        var people = PersonIndex(try modelContext.fetch(FetchDescriptor<PersonRecord>()))
         var registrations = try modelContext.fetch(FetchDescriptor<RegistrationRecord>())
         var inserted = 0
         var updated = 0
@@ -235,7 +237,7 @@ enum ScoutbookImporter {
             } else {
                 person = PersonRecord(firstName: name.first, lastName: name.last, role: role)
                 modelContext.insert(person)
-                people.append(person)
+                people.add(person)
                 inserted += 1
             }
 
@@ -314,7 +316,7 @@ enum ScoutbookImporter {
 
     @MainActor
     private static func importPayments(_ rows: [ScoutbookCSVRow], into modelContext: ModelContext) throws -> ScoutbookImportResult {
-        var people = try modelContext.fetch(FetchDescriptor<PersonRecord>())
+        var people = PersonIndex(try modelContext.fetch(FetchDescriptor<PersonRecord>()))
         var existingIDs = Set(try modelContext.fetch(FetchDescriptor<MemberLedgerEntry>()).filter { $0.sourceSystem == "Scoutbook" }.map(\.externalSourceID))
         var inserted = 0
         var skipped = 0
@@ -340,7 +342,8 @@ enum ScoutbookImporter {
                 : row.value(["Category", "Account", "Purpose", "Item"])
             let description = row.value(["Description", "Memo", "Notes", "Comment", "Details"])
             let sourceID = stableRowID(memberID: memberID, name: name, date: date, type: transactionType, amount: rawCents, category: category, description: description)
-            guard !existingIDs.contains(sourceID) else {
+            let legacyID = legacyRowID(memberID: memberID, name: name, date: date, type: transactionType, amount: rawCents, category: category, description: description)
+            guard !existingIDs.contains(sourceID), !existingIDs.contains(legacyID) else {
                 skipped += 1
                 continue
             }
@@ -357,7 +360,7 @@ enum ScoutbookImporter {
                 created.scoutingMemberID = memberID
                 created.notes = "Created from a Scoutbook payment-log import; confirm this person's role."
                 modelContext.insert(created)
-                people.append(created)
+                people.add(created)
                 person = created
             }
 
@@ -390,6 +393,7 @@ enum ScoutbookImporter {
     }
 
     private static func decode(_ data: Data) -> String? {
+        if let utf16 = GeneralSpreadsheetImporter.decodeUTF16IfMarked(data) { return utf16 }
         if let utf8 = String(data: data, encoding: .utf8) { return utf8.removingPrefix("\u{feff}") }
         if let windows = String(data: data, encoding: .windowsCP1252) { return windows }
         return String(data: data, encoding: .isoLatin1)
@@ -501,22 +505,29 @@ enum ScoutbookImporter {
         guard !value.isEmpty else { return nil }
         // A `yyyy` pattern happily accepts a two-digit year ("1/15/24" becomes 15 January 0024), so every
         // candidate is checked for a plausible year before the two-digit `yy` patterns get their turn.
-        let formats = [
-            "M/d/yyyy h:mm a", "M/d/yyyy H:mm", "M/d/yyyy", "MM/dd/yyyy",
-            "M/d/yy h:mm a", "M/d/yy H:mm", "M/d/yy",
-            "yyyy-MM-dd'T'HH:mm:ssZZZZZ", "yyyy-MM-dd",
-        ]
         let calendar = Calendar(identifier: .gregorian)
-        for format in formats {
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.calendar = calendar
-            formatter.dateFormat = format
+        for formatter in dateFormatters {
             if let date = formatter.date(from: value), (1900...2200).contains(calendar.component(.year, from: date)) {
                 return date
             }
         }
         return nil
+    }
+
+    /// Built once: `parsedDate` runs up to three times per roster row and once per payment row, and nine
+    /// fresh DateFormatters per call dominated the import time. DateFormatter is thread-safe for parsing.
+    private static let dateFormats: [String] = [
+            "M/d/yyyy h:mm a", "M/d/yyyy H:mm", "M/d/yyyy", "MM/dd/yyyy",
+            "M/d/yy h:mm a", "M/d/yy H:mm", "M/d/yy",
+            "yyyy-MM-dd'T'HH:mm:ssZZZZZ", "yyyy-MM-dd",
+    ]
+
+    nonisolated(unsafe) private static let dateFormatters: [DateFormatter] = dateFormats.map { format in
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = format
+        return formatter
     }
 
     private static func parsedCents(_ value: String) -> Int64? {
@@ -527,7 +538,9 @@ enum ScoutbookImporter {
             .replacingOccurrences(of: ",", with: "")
             .replacingOccurrences(of: "(", with: "-")
             .replacingOccurrences(of: ")", with: "")
-        guard let decimal = Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX")) else { return nil }
+        // Decimal(string:) accepts trailing garbage ("12/25/2024" parses as 12); require a plain number.
+        guard GeneralSpreadsheetImporter.isPlainDecimal(cleaned),
+              let decimal = Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX")) else { return nil }
         var value = decimal * 100
         var rounded = Decimal()
         NSDecimalRound(&rounded, &value, 0, .plain)
@@ -537,31 +550,45 @@ enum ScoutbookImporter {
         return negative && cents > 0 ? -cents : cents
     }
 
-    private static func findPerson(memberID: String, firstName: String, lastName: String, in people: [PersonRecord]) -> PersonRecord? {
+    /// Roster lookups indexed once per import. Matching used to rescan every person, folding each name, for
+    /// every row of the file; a payment log of tens of thousands of rows made that millions of foldings.
+    struct PersonIndex {
+        private(set) var byMemberID: [String: PersonRecord] = [:]
+        private(set) var byName: [String: [PersonRecord]] = [:]
+
+        init(_ people: [PersonRecord]) {
+            for person in people { add(person) }
+        }
+
+        mutating func add(_ person: PersonRecord) {
+            let memberID = person.scoutingMemberID
+            if !memberID.isEmpty, byMemberID[memberID] == nil { byMemberID[memberID] = person }
+            byName[ScoutbookImporter.normalizedName(firstName: person.firstName, lastName: person.lastName), default: []].append(person)
+        }
+    }
+
+    private static func findPerson(memberID: String, firstName: String, lastName: String, in people: PersonIndex) -> PersonRecord? {
         let target = normalizedName(firstName: firstName, lastName: lastName)
+        let sameName = people.byName[target] ?? []
         if !memberID.isEmpty {
-            if let match = people.first(where: { $0.scoutingMemberID == memberID }) { return match }
+            if let match = people.byMemberID[memberID] { return match }
             // A matching name with a different nonblank member ID is a different person, not an update.
-            let unnamedIDMatches = people.filter {
-                $0.scoutingMemberID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    && normalizedName(firstName: $0.firstName, lastName: $0.lastName) == target
-            }
+            let unnamedIDMatches = sameName.filter { $0.scoutingMemberID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             return unnamedIDMatches.count == 1 ? unnamedIDMatches[0] : nil
         }
         guard !target.isEmpty else { return nil }
-        let matches = people.filter { normalizedName(firstName: $0.firstName, lastName: $0.lastName) == target }
-        return matches.count == 1 ? matches[0] : nil
+        return sameName.count == 1 ? sameName[0] : nil
     }
 
-    private static func isAmbiguous(memberID: String, firstName: String, lastName: String, in people: [PersonRecord]) -> Bool {
+    private static func isAmbiguous(memberID: String, firstName: String, lastName: String, in people: PersonIndex) -> Bool {
         let target = normalizedName(firstName: firstName, lastName: lastName)
         guard !target.isEmpty else { return false }
-        let sameName = people.filter { normalizedName(firstName: $0.firstName, lastName: $0.lastName) == target }
+        let sameName = people.byName[target] ?? []
         if memberID.isEmpty { return sameName.count > 1 }
         return sameName.filter { $0.scoutingMemberID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count > 1
     }
 
-    private static func normalizedName(firstName: String, lastName: String) -> String {
+    fileprivate static func normalizedName(firstName: String, lastName: String) -> String {
         String(
             "\(firstName) \(lastName)".folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
                 .filter { $0.isLetter || $0.isNumber }
@@ -575,9 +602,21 @@ enum ScoutbookImporter {
     }
 
     private static func stableRowID(memberID: String, name: (first: String, last: String), date: Date, type: String, amount: Int64, category: String, description: String) -> String {
-        let key = [memberID, name.first, name.last, ISO8601DateFormatter().string(from: date), type, String(amount), category, description].joined(separator: "|")
+        // The key uses the row's local wall-clock date. Hashing the instant in UTC made the same row hash
+        // differently on devices in different time zones, so a shared database re-imported overlapping rows.
+        let parts = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        let dateKey = String(format: "%04d-%02d-%02d %02d:%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0, parts.hour ?? 0, parts.minute ?? 0)
+        let key = [memberID, name.first, name.last, dateKey, type, String(amount), category, description].joined(separator: "|")
         return sha256(Data(key.utf8))
     }
+
+    /// The form of `stableRowID` written by earlier builds, checked once so upgrading does not double the log.
+    private static func legacyRowID(memberID: String, name: (first: String, last: String), date: Date, type: String, amount: Int64, category: String, description: String) -> String {
+        let key = [memberID, name.first, name.last, legacyISOFormatter.string(from: date), type, String(amount), category, description].joined(separator: "|")
+        return sha256(Data(key.utf8))
+    }
+
+    nonisolated(unsafe) private static let legacyISOFormatter = ISO8601DateFormatter()
 
     private static func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()

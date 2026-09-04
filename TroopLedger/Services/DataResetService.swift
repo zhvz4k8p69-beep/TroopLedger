@@ -203,11 +203,16 @@ enum DataIntegrityService {
                 issues.append(.init(severity: .warning, area: "Member ledger", message: "A payment of \(Money.currency(cents: entry.amountCents)) dated \(entry.date.formatted(date: .numeric, time: .omitted)) points to a bank receipt that no longer exists."))
             }
         }
+        // Grouped once; per-record filters over the full tables made this check quadratic in a large database.
+        let allocationsByBatch = Dictionary(grouping: allocations, by: \.batchID)
+        let participantsByEvent = Dictionary(grouping: participants, by: \.eventID)
+        let eventIncomeByEvent = Dictionary(grouping: transactions.filter { $0.direction == .income && !$0.isTransfer }, by: \.eventID)
+        let closedOutEventIDs = Set(closeouts.compactMap(\.eventID))
         for batch in batches {
             for (label, id) in [("holding", batch.holdingTransactionID), ("bank", batch.bankTransactionID)] where id.map({ !transactionIDs.contains($0) }) ?? true {
                 issues.append(.init(severity: .problem, area: "Deposits", message: "Deposit of \(Money.currency(cents: batch.totalCents)) on \(batch.depositDate.formatted(date: .numeric, time: .omitted)) is missing its \(label) transfer entry."))
             }
-            let allocated = allocations.filter { $0.batchID == batch.id }.reduce(Int64(0)) { $0 + $1.amountCents }
+            let allocated = (allocationsByBatch[batch.id] ?? []).reduce(Int64(0)) { $0 + $1.amountCents }
             if allocated != batch.totalCents {
                 issues.append(.init(severity: .problem, area: "Deposits", message: "Deposit of \(Money.currency(cents: batch.totalCents)) on \(batch.depositDate.formatted(date: .numeric, time: .omitted)) has allocations totaling \(Money.currency(cents: allocated))."))
             }
@@ -226,7 +231,7 @@ enum DataIntegrityService {
         for registration in registrations where registration.personID.map({ !personIDs.contains($0) }) ?? true {
             issues.append(.init(severity: .warning, area: "People", message: "A \(registration.programYear) registration belongs to a person that no longer exists."))
         }
-        for event in events where event.closedAt != nil && !closeouts.contains(where: { $0.eventID == event.id }) {
+        for event in events where event.closedAt != nil && !closedOutEventIDs.contains(event.id) {
             issues.append(.init(severity: .problem, area: "Events", message: "\(event.name) is marked closed but has no close-out record."))
         }
         // Cash traceability: member payments that no bank receipt backs, and rosters that record more money
@@ -237,9 +242,9 @@ enum DataIntegrityService {
             issues.append(.init(severity: .warning, area: "Cash traceability", message: "\(unlinkedPayments.count) member payment\(unlinkedPayments.count == 1 ? "" : "s") totaling \(Money.currency(cents: total)) \(unlinkedPayments.count == 1 ? "is" : "are") not linked to a bank receipt."))
         }
         for event in events {
-            let rosterPaid = participants.filter { $0.eventID == event.id }.reduce(Int64(0)) { $0 + $1.paidCents }
+            let rosterPaid = (participantsByEvent[event.id] ?? []).reduce(Int64(0)) { $0 + $1.paidCents }
             guard rosterPaid > 0 else { continue }
-            let linkedIncome = transactions.filter { $0.eventID == event.id && $0.direction == .income && !$0.isTransfer }.reduce(Int64(0)) { $0 + $1.amountCents }
+            let linkedIncome = (eventIncomeByEvent[event.id] ?? []).reduce(Int64(0)) { $0 + $1.amountCents }
             if rosterPaid > linkedIncome {
                 issues.append(.init(severity: .warning, area: "Cash traceability", message: "\(event.name): roster payments total \(Money.currency(cents: rosterPaid)) but only \(Money.currency(cents: linkedIncome)) of income is linked to the event."))
             }

@@ -10,6 +10,7 @@ struct ReportsView: View {
     @Query private var memberEntries: [MemberLedgerEntry]
     @Query private var budgets: [OperatingBudgetRecord]
     @Query private var budgetLines: [BudgetLineRecord]
+    @Query private var categories: [LedgerCategoryRecord]
     @AppStorage("reports.reportingYearBasis") private var reportingYearBasisRaw = ReportingYearBasis.schoolYear.rawValue
     @State private var selectedYear = ReportingYearBasis.schoolYear.startingYear(containing: Date())
     @State private var initializedReportingYear = false
@@ -58,25 +59,34 @@ struct ReportsView: View {
     }
     private var budgetVariance: BudgetVarianceReport? {
         guard reportBudget != nil else { return nil }
-        return BudgetEngine.varianceReport(period: reportingPeriod, transactions: transactions, budgetLines: reportBudgetLines)
+        return BudgetEngine.varianceReport(period: reportingPeriod, transactions: transactions, budgetLines: reportBudgetLines, categories: categories)
     }
     private var budgetSourceLabel: String {
         guard let reportBudget else { return "" }
         return reportBudget.status == .approved ? "Approved Revision \(reportBudget.revision)" : "Working Budget"
     }
     private var cashPosition: CashPosition { FinanceEngine.cashPosition(accounts: accounts, transactions: transactions) }
+    private var accountBalances: [UUID: Int64] { FinanceEngine.bookBalances(accounts: accounts, transactions: transactions) }
     private var reportableAccounts: [AccountRecord] {
-        accounts.filter { $0.isActive || FinanceEngine.bookBalance(account: $0, transactions: transactions) != 0 }
+        let balances = accountBalances
+        return accounts.filter { $0.isActive || (balances[$0.id] ?? 0) != 0 }
     }
-    private var dueToTroop: Int64 {
-        people.reduce(0) { $0 + max(0, FinanceEngine.memberBalance(personID: $1.id, entries: memberEntries)) }
-    }
-    private var memberCredits: Int64 {
-        people.reduce(0) { $0 + min(0, FinanceEngine.memberBalance(personID: $1.id, entries: memberEntries)) }
+    /// Both member figures from one pass over the ledger instead of one scan per person per figure.
+    private var memberTotals: (due: Int64, credits: Int64) {
+        let balances = FinanceEngine.memberBalances(entries: memberEntries)
+        return people.reduce(into: (Int64(0), Int64(0))) { totals, person in
+            let balance = balances[person.id] ?? 0
+            totals.0 += max(0, balance)
+            totals.1 += min(0, balance)
+        }
     }
 
     var body: some View {
-        List {
+        let annual = self.annual
+        let cashPosition = self.cashPosition
+        let memberTotals = self.memberTotals
+        let accountBalances = self.accountBalances
+        return List {
             Section {
                 TroopReportHeader(
                     profile: troopProfiles.first,
@@ -139,15 +149,15 @@ struct ReportsView: View {
 
             Section("Balance Report as of Today") {
                 ForEach(reportableAccounts) { account in
-                    reportRow(account.name, FinanceEngine.bookBalance(account: account, transactions: transactions))
+                    reportRow(account.name, accountBalances[account.id] ?? 0)
                 }
                 Divider()
                 reportRow("Bank and cash on hand", cashPosition.bankAndCashOnHandCents)
                 reportRow("Undeposited funds awaiting deposit", cashPosition.undepositedFundsCents, colorBySign: true)
                 reportRow("Total cash", cashPosition.totalCents, emphasized: true)
-                reportRow("Member balances due to troop", dueToTroop)
-                reportRow("Member credits owed", memberCredits, colorBySign: true)
-                reportRow("Available after member credits", cashPosition.totalCents + memberCredits, emphasized: true, colorBySign: true)
+                reportRow("Member balances due to troop", memberTotals.due)
+                reportRow("Member credits owed", memberTotals.credits, colorBySign: true)
+                reportRow("Available after member credits", cashPosition.totalCents + memberTotals.credits, emphasized: true, colorBySign: true)
             }
 
             Section("Reimbursement Oversight") {

@@ -17,17 +17,20 @@ struct EventRosterView: View {
         return roster.rows.compactMap { participantByID[$0.id] }
     }
 
-    private var scouts: [EventParticipant] { participants.filter { person(for: $0)?.role == .scout } }
-    private var adults: [EventParticipant] { participants.filter { [.leader, .parent].contains(person(for: $0)?.role) } }
-    private var others: [EventParticipant] {
-        participants.filter {
-            guard let role = person(for: $0)?.role else { return true }
-            return ![.scout, .leader, .parent].contains(role)
-        }
+    private var peopleByID: [UUID: PersonRecord] {
+        Dictionary(people.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     var body: some View {
-        List {
+        // The roster snapshot and the role groupings were rebuilt for every header count and section.
+        let participants = self.participants
+        let scouts = participants.filter { person(for: $0)?.role == .scout }
+        let adults = participants.filter { [.leader, .parent].contains(person(for: $0)?.role) }
+        let others = participants.filter {
+            guard let role = person(for: $0)?.role else { return true }
+            return ![.scout, .leader, .parent].contains(role)
+        }
+        return List {
             Section {
                 TroopReportHeader(
                     profile: troopProfiles.first,
@@ -163,7 +166,7 @@ struct EventRosterView: View {
     }
 
     private func person(for participant: EventParticipant) -> PersonRecord? {
-        participant.personID.flatMap { id in people.first { $0.id == id } }
+        participant.personID.flatMap { peopleByID[$0] }
     }
 
     private func participantDetails(_ participant: EventParticipant) -> String {

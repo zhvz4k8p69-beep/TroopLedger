@@ -128,6 +128,7 @@ struct PeopleListView: View {
                 }
                 .listRowBackground(Color.clear)
             } else {
+                let balances = FinanceEngine.memberBalances(entries: entries)
                 ForEach(filtered) { person in
                     NavigationLink(value: person) {
                         HStack {
@@ -149,7 +150,7 @@ struct PeopleListView: View {
                                 }
                             }
                             Spacer()
-                            MoneyText(cents: FinanceEngine.memberBalance(personID: person.id, entries: entries), colorBySign: true)
+                            MoneyText(cents: balances[person.id] ?? 0, colorBySign: true)
                         }
                     }
                 }
@@ -185,8 +186,9 @@ struct PeopleListView: View {
 
     /// The default Active filter hid money still owed by or to families who left.
     private var inactiveBalances: (count: Int, total: Int64) {
+        let byPerson = FinanceEngine.memberBalances(entries: entries)
         let balances = people.filter { !$0.isActive }
-            .map { FinanceEngine.memberBalance(personID: $0.id, entries: entries) }
+            .compactMap { byPerson[$0.id] }
             .filter { $0 != 0 }
         return (balances.count, balances.reduce(0, +))
     }

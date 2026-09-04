@@ -72,6 +72,7 @@ enum TreasurerReportService {
         reconciliations: [ReconciliationRecord],
         budget: OperatingBudgetRecord? = nil,
         budgetLines: [BudgetLineRecord] = [],
+        categories: [LedgerCategoryRecord] = [],
         generatedAt: Date = Date(),
         calendar: Calendar = .current
     ) -> TreasurerReportSnapshot {
@@ -90,12 +91,16 @@ enum TreasurerReportService {
         let credits = people.reduce(Int64(0)) { total, person in
             total + min(0, balances[person.id]?.reduce(Int64(0)) { $0 + $1.balanceEffectCents } ?? 0)
         }
-        let reportPeriod = ReportingPeriod.containing(end, basis: .schoolYear, calendar: calendar)
+        // ReportingPeriod owns its Gregorian calendar so month 9 means September; only the day boundaries
+        // above come from the caller's calendar. Passing a non-Gregorian device calendar built the period
+        // from the wrong year and month numbers.
+        let reportPeriod = ReportingPeriod.containing(end, basis: .schoolYear)
         let variance = budget.map { _ in
             BudgetEngine.varianceReport(
                 period: reportPeriod,
                 transactions: transactions.filter { $0.date < endExclusive },
-                budgetLines: budgetLines
+                budgetLines: budgetLines,
+                categories: categories
             )
         }
         let budgetLabel = budget.map {
@@ -194,7 +199,7 @@ enum TreasurerReportService {
         CSVFormatting.field(value)
     }
 
-    fileprivate static func iso(_ date: Date) -> String { ISO8601DateFormatter().string(from: date) }
+    fileprivate static func iso(_ date: Date) -> String { date.formatted(.iso8601) }
 
     private static func cashPosition(accounts: [AccountRecord], transactions: [LedgerTransaction]) -> CashPosition {
         FinanceEngine.cashPosition(accounts: accounts, transactions: transactions)
@@ -324,6 +329,7 @@ enum AnnualAuditPackageService {
         let reconciliations = try context.fetch(FetchDescriptor<ReconciliationRecord>())
         let budgets = try context.fetch(FetchDescriptor<OperatingBudgetRecord>())
         let budgetLines = try context.fetch(FetchDescriptor<BudgetLineRecord>())
+        let categories = try context.fetch(FetchDescriptor<LedgerCategoryRecord>())
         let requests = try context.fetch(FetchDescriptor<ReimbursementRequest>())
         let attachments = try context.fetch(FetchDescriptor<ReimbursementAttachment>())
         let settings = try context.fetch(FetchDescriptor<DisbursementControlSettings>(sortBy: [SortDescriptor(\.modifiedAt, order: .reverse)])).first
@@ -344,6 +350,7 @@ enum AnnualAuditPackageService {
             reconciliations: reconciliations,
             budget: budget,
             budgetLines: budget.map { selected in budgetLines.filter { $0.budgetID == selected.id } } ?? [],
+            categories: categories,
             generatedAt: generatedAt
         )
         guard let pdf = TreasurerReportPDFRenderer.render(report) else { throw CocoaError(.fileWriteUnknown) }
@@ -352,6 +359,7 @@ enum AnnualAuditPackageService {
             attachments: attachments,
             transactions: transactions,
             people: people,
+            families: try context.fetch(FetchDescriptor<FamilyRecord>()),
             auditEntries: audit,
             policy: DisbursementControlPolicy(settings: settings),
             generatedAt: generatedAt

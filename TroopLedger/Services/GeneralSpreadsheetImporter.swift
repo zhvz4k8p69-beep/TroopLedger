@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 import SwiftData
 
 enum TransactionImportField: String, CaseIterable, Identifiable, Hashable {
@@ -164,7 +165,10 @@ enum GeneralSpreadsheetImporter {
 
     static func parse(data: Data, sourceName: String) throws -> GeneralSpreadsheetDocument {
         guard data.count <= maximumFileBytes else { throw GeneralSpreadsheetImportError.fileTooLarge }
-        guard let text = decode(data) else { throw GeneralSpreadsheetImportError.unreadableText }
+        guard let rawText = decode(data) else { throw GeneralSpreadsheetImportError.unreadableText }
+        // "\r\n" is a single Character in Swift and matches neither "\n" nor "\r" in parseTable, so a
+        // Windows or RFC 4180 export used to collapse into one enormous row.
+        let text = rawText.replacingOccurrences(of: "\r\n", with: "\n")
         let delimiter = detectedDelimiter(in: text)
         let table = parseTable(text, delimiter: delimiter)
         let headerIndex = headerRowIndex(in: table)
@@ -431,6 +435,9 @@ enum GeneralSpreadsheetImporter {
                 direction = signed < 0 ? .expense : defaultDirection
             } else if let parsed = parsedDirection(directionText) {
                 direction = parsed
+            } else if signed < 0 {
+                // An unfamiliar bank "Type" label ("WIRE_OUTGOING", "ZELLE") must not block a row whose sign is explicit.
+                direction = .expense
             } else {
                 return (nil, "Unrecognized income/expense type.")
             }
@@ -491,20 +498,40 @@ enum GeneralSpreadsheetImporter {
             "M/d/yyyy H:mm:ss", "M/d/yyyy H:mm", "M/d/yyyy h:mm a", "M/d/yyyy h:mm:ss a", "M/d/yy H:mm",
             "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "MM-dd-yyyy", "M-d-yyyy",
         ]
-        for format in formats {
-            let formatter = DateFormatter()
-            formatter.calendar = calendar
-            formatter.timeZone = calendar.timeZone
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.dateFormat = format
-            formatter.isLenient = false
+        for formatter in dateFormatters(for: formats, calendar: calendar) {
             if let date = formatter.date(from: value), (1900...2200).contains(calendar.component(.year, from: date)) {
                 return date
             }
         }
+        return isoFormatter.date(from: value)
+    }
+
+    nonisolated(unsafe) private static let isoFormatter: ISO8601DateFormatter = {
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime]
-        return iso.date(from: value)
+        return iso
+    }()
+
+    /// Formatters are cached per calendar and time zone. Up to seventeen were built for every row, and the
+    /// preview re-parses the whole file on each mapping change; a 25,000-row file spent most of its time here.
+    private static let formatterCache = OSAllocatedUnfairLock<[String: [DateFormatter]]>(initialState: [:])
+
+    private static func dateFormatters(for formats: [String], calendar: Calendar) -> [DateFormatter] {
+        let key = "\(calendar.identifier)|\(calendar.timeZone.identifier)|\(formats.joined(separator: ","))"
+        return formatterCache.withLock { cache in
+            if let cached = cache[key] { return cached }
+            let built = formats.map { format in
+                let formatter = DateFormatter()
+                formatter.calendar = calendar
+                formatter.timeZone = calendar.timeZone
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.dateFormat = format
+                formatter.isLenient = false
+                return formatter
+            }
+            cache[key] = built
+            return built
+        }
     }
 
     private static func parsedCents(_ value: String) -> Int64? {
@@ -535,7 +562,9 @@ enum GeneralSpreadsheetImporter {
             cleaned = cleaned.replacingOccurrences(of: ",", with: ".")
         }
         cleaned = cleaned.replacingOccurrences(of: ",", with: "")
-        guard var decimal = Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX")) else { return nil }
+        // Decimal(string:) is Scanner-based: "12/25/2024" parses as 12 and "45.00 USD" as 45, so a misaligned
+        // column would post real money. Only a plain number may pass.
+        guard isPlainDecimal(cleaned), var decimal = Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX")) else { return nil }
         if parenthesized || trailingMinus || debitSuffix { decimal = -abs(decimal) }
         var scaled = decimal * 100
         var rounded = Decimal()
@@ -544,7 +573,26 @@ enum GeneralSpreadsheetImporter {
         return NSDecimalNumber(decimal: rounded).int64Value
     }
 
+    /// Digits with at most one decimal point and an optional leading minus; nothing else.
+    static func isPlainDecimal(_ text: String) -> Bool {
+        var body = Substring(text)
+        if body.hasPrefix("-") { body = body.dropFirst() }
+        let parts = body.split(separator: ".", omittingEmptySubsequences: false)
+        guard (1...2).contains(parts.count), parts.contains(where: { !$0.isEmpty }) else { return false }
+        return parts.allSatisfy { $0.allSatisfy { $0.isASCII && $0.isNumber } }
+    }
+
+    /// Excel's "Unicode Text" export is UTF-16 with a byte-order mark; decoded as UTF-8 it fails and CP1252
+    /// then "succeeds" as NUL-padded noise that never matches a header.
+    static func decodeUTF16IfMarked(_ data: Data) -> String? {
+        guard data.count >= 2 else { return nil }
+        let first = data[data.startIndex], second = data[data.startIndex + 1]
+        guard (first == 0xFF && second == 0xFE) || (first == 0xFE && second == 0xFF) else { return nil }
+        return String(data: data, encoding: .utf16)
+    }
+
     private static func decode(_ data: Data) -> String? {
+        if let utf16 = decodeUTF16IfMarked(data) { return utf16 }
         if let utf8 = String(data: data, encoding: .utf8) {
             return utf8.hasPrefix("\u{feff}") ? String(utf8.dropFirst()) : utf8
         }

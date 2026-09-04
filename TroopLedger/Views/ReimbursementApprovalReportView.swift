@@ -34,7 +34,9 @@ struct ReimbursementApprovalReportView: View {
     }
 
     var body: some View {
-        List {
+        // Built once per render; the summary section alone read the computed report eight times.
+        let report = self.report
+        return List {
             Section {
                 TroopReportHeader(
                     profile: troopProfiles.first,

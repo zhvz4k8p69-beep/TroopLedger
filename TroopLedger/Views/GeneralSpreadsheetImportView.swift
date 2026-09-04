@@ -7,6 +7,7 @@ struct GeneralSpreadsheetImportView: View {
     @Query(sort: \AccountRecord.name) private var accounts: [AccountRecord]
     @Query(sort: \ReconciliationRecord.statementDate, order: .reverse) private var reconciliations: [ReconciliationRecord]
     @Query(sort: \GeneralSpreadsheetImportRecord.importedAt, order: .reverse) private var importHistory: [GeneralSpreadsheetImportRecord]
+    @Query private var transactions: [LedgerTransaction]
     @State private var showingFileImporter = false
     @State private var document: GeneralSpreadsheetDocument?
     @State private var mapping = TransactionColumnMapping()
@@ -26,7 +27,10 @@ struct GeneralSpreadsheetImportView: View {
             accountID: accountID,
             defaultDirection: defaultDirection,
             defaultCategory: defaultCategory,
-            reconciliations: reconciliations
+            reconciliations: reconciliations,
+            // The import itself flags rows that duplicate existing register entries; the on-screen dry run
+            // must see the same rows or it reports "0 exceptions" and the import then fails after confirmation.
+            existingTransactions: transactions
         )
     }
 
@@ -35,7 +39,7 @@ struct GeneralSpreadsheetImportView: View {
         return importHistory.contains { $0.sourceFingerprint == document.fingerprint }
     }
 
-    private var canImport: Bool {
+    private func canImport(_ preview: GeneralSpreadsheetPreview?) -> Bool {
         guard let preview else { return false }
         return !alreadyImported &&
             preview.mappingIssues.isEmpty &&
@@ -44,7 +48,9 @@ struct GeneralSpreadsheetImportView: View {
     }
 
     var body: some View {
-        List {
+        // The dry run parses every row of the file; evaluate it once per render rather than three times.
+        let preview = self.preview
+        return List {
             Section("Transaction Spreadsheet") {
                 Text("Import a transaction register exported from any spreadsheet as CSV or tab-separated text. TroopLedger does not modify the source file and performs a complete dry run before writing anything.")
                     .font(.footnote)
@@ -58,7 +64,7 @@ struct GeneralSpreadsheetImportView: View {
                 sourceSection(document)
                 destinationSection
                 mappingSection(document)
-                previewSections(document)
+                previewSections(document, preview: preview)
             }
 
             if !importHistory.isEmpty {
@@ -123,7 +129,8 @@ struct GeneralSpreadsheetImportView: View {
         Section("Destination and Defaults") {
             Picker("Account", selection: $accountID) {
                 Text("Choose an account").tag(nil as UUID?)
-                ForEach(accounts) { account in Text(account.name).tag(account.id as UUID?) }
+                    // The importer refuses an inactive destination after confirmation; do not offer one.
+                ForEach(accounts.filter(\.isActive)) { account in Text(account.name).tag(account.id as UUID?) }
             }
             Picker("Default type", selection: $defaultDirection) {
                 ForEach(TransactionDirection.allCases) { direction in Text(direction.rawValue).tag(direction) }
@@ -152,7 +159,7 @@ struct GeneralSpreadsheetImportView: View {
     }
 
     @ViewBuilder
-    private func previewSections(_ document: GeneralSpreadsheetDocument) -> some View {
+    private func previewSections(_ document: GeneralSpreadsheetDocument, preview: GeneralSpreadsheetPreview?) -> some View {
         if let preview {
             Section("Dry-Run Preview") {
                 LabeledContent("Source rows", value: String(document.rows.count))
@@ -214,7 +221,7 @@ struct GeneralSpreadsheetImportView: View {
                 Button("Import Ready Transactions", systemImage: "square.and.arrow.down") {
                     showingConfirmation = true
                 }
-                .disabled(!canImport)
+                .disabled(!canImport(preview))
                 if alreadyImported {
                     Text("Duplicate protection prevents importing this exact file again.")
                         .font(.footnote)
