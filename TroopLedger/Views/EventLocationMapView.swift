@@ -62,6 +62,13 @@ struct EventLocationMapView: View {
             return
         }
 
+        // Every visit to an event detail screen used to issue a fresh Apple Maps search for the same address;
+        // the answer for a query does not change between navigations, so reuse it for the life of the process.
+        if let cached = EventLocationSearchCache.shared.result(for: trimmedQuery) {
+            apply(cached)
+            return
+        }
+
         isSearching = true
         searchFailed = false
         let request = MKLocalSearch.Request()
@@ -70,14 +77,9 @@ struct EventLocationMapView: View {
         do {
             let response = try await MKLocalSearch(request: request).start()
             guard !Task.isCancelled else { return }
-            mapItem = response.mapItems.first
-            if let coordinate = mapItem?.placemark.coordinate {
-                cameraPosition = .region(MKCoordinateRegion(
-                    center: coordinate,
-                    span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
-                ))
-            }
-            searchFailed = mapItem == nil
+            let found = response.mapItems.first
+            EventLocationSearchCache.shared.store(found, for: trimmedQuery)
+            apply(found)
         } catch {
             guard !Task.isCancelled else { return }
             mapItem = nil
@@ -86,11 +88,59 @@ struct EventLocationMapView: View {
         isSearching = false
     }
 
+    private func apply(_ found: MKMapItem?) {
+        mapItem = found
+        if let coordinate = found?.placemark.coordinate {
+            cameraPosition = .region(MKCoordinateRegion(
+                center: coordinate,
+                span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
+            ))
+        }
+        searchFailed = found == nil
+        isSearching = false
+    }
+
     private var mapsURL: URL? {
         var components = URLComponents(string: "https://maps.apple.com/")
         components?.queryItems = [URLQueryItem(name: "q", value: query)]
         return components?.url
     }
+}
+
+/// Process-wide memo of Apple Maps lookups keyed by the normalized query. A "not found" answer is remembered
+/// too, so a venue Maps cannot place is not searched again on every navigation.
+@MainActor
+final class EventLocationSearchCache {
+    static let shared = EventLocationSearchCache(limit: 200)
+
+    private let limit: Int
+    private var results: [String: MKMapItem?] = [:]
+    private var order: [String] = []
+
+    init(limit: Int) {
+        self.limit = max(1, limit)
+    }
+
+    static func key(for query: String) -> String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    /// Nil when the query was never looked up; `.some(nil)` when it was looked up and nothing was found.
+    func result(for query: String) -> MKMapItem?? {
+        results[Self.key(for: query)]
+    }
+
+    func store(_ item: MKMapItem?, for query: String) {
+        let key = Self.key(for: query)
+        if results.updateValue(item, forKey: key) == nil {
+            order.append(key)
+            if order.count > limit {
+                results.removeValue(forKey: order.removeFirst())
+            }
+        }
+    }
+
+    var count: Int { results.count }
 }
 
 private extension String {

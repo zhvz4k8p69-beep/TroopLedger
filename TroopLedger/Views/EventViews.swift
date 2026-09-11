@@ -31,24 +31,48 @@ struct EventListView: View {
     }
 
     private var upcomingEvents: [EventRecord] {
-        events
-            .filter { $0.endDate >= Calendar.current.startOfDay(for: Date()) && $0.status != .cancelled }
+        let today = Calendar.current.startOfDay(for: Date())
+        return events
+            .filter { $0.endDate >= today && $0.status != .cancelled }
             .sorted { $0.startDate < $1.startDate }
     }
 
-    private var expectedIncome: Int64 { upcomingEvents.reduce(0) { $0 + $1.budgetIncomeCents } }
-    private var expectedExpense: Int64 { upcomingEvents.reduce(0) { $0 + $1.budgetExpenseCents } }
-    private var balancesDue: Int64 {
-        let upcomingIDs = Set(upcomingEvents.map(\.id))
+    private func balancesDue(for upcoming: [EventRecord]) -> Int64 {
+        let upcomingIDs = Set(upcoming.map(\.id))
         return participants
             .filter { participant in participant.eventID.map(upcomingIDs.contains) ?? false }
             .filter { EventCloseoutService.financiallyIncludedStatuses.contains($0.status) }
             .reduce(0) { $0 + max(0, $1.feeCents - $1.paidCents) }
     }
 
+    /// Net money per event for the list. Imported actuals win only when non-projected entries exist; otherwise
+    /// the linked ledger transactions count. One grouping pass replaces a rescan of both tables per row.
+    static func netByEvent(entries: [EventFinancialEntry], transactions: [LedgerTransaction]) -> [UUID: Int64] {
+        var fromEntries: [UUID: Int64] = [:]
+        for entry in entries where !entry.isProjected {
+            guard let eventID = entry.eventID else { continue }
+            fromEntries[eventID, default: 0] += entry.direction == .income ? entry.amountCents : -entry.amountCents
+        }
+        var fromTransactions: [UUID: Int64] = [:]
+        for transaction in transactions {
+            guard let eventID = transaction.eventID else { continue }
+            fromTransactions[eventID, default: 0] += transaction.signedAmountCents
+        }
+        return fromTransactions.merging(fromEntries) { _, imported in imported }
+    }
+
+    /// People who cancelled are not on the roster for headcount purposes.
+    static func rosterHeadcount(_ participants: [EventParticipant]) -> Int {
+        participants.filter { $0.status != .cancelled }.count
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            eventHero
+        // `upcomingEvents` filtered and sorted every event on each of its seven reads per render, and each list
+        // row rescanned every event financial entry and every ledger transaction for its net figure.
+        let upcoming = upcomingEvents
+        let netByEvent = Self.netByEvent(entries: eventEntries, transactions: transactions)
+        return VStack(spacing: 0) {
+            eventHero(upcoming: upcoming)
 
             HStack {
                 Picker("Event view", selection: $presentation) {
@@ -62,8 +86,8 @@ struct EventListView: View {
 
                 Spacer()
 
-                if !upcomingEvents.isEmpty {
-                    Text("\(upcomingEvents.count) upcoming")
+                if !upcoming.isEmpty {
+                    Text("\(upcoming.count) upcoming")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -77,9 +101,9 @@ struct EventListView: View {
             if events.isEmpty {
                 EmptyMessage(title: "No events", message: "Create a campout, fundraiser, training, or other event and track its full budget and attendance.", systemImage: "calendar")
             } else if presentation == .calendar {
-                calendarWorkspace
+                calendarWorkspace(upcoming: upcoming)
             } else {
-                eventList
+                eventList(netByEvent: netByEvent)
             }
         }
         .background { FieldbookPageBackground() }
@@ -110,7 +134,7 @@ struct EventListView: View {
         }
     }
 
-    private var eventHero: some View {
+    private func eventHero(upcoming: [EventRecord]) -> some View {
         VStack(alignment: .leading, spacing: 15) {
             HStack(alignment: .top, spacing: 12) {
                 FieldbookActivityEmblem(systemImage: "tent.2.fill", size: 46)
@@ -124,10 +148,10 @@ struct EventListView: View {
             }
 
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 135), spacing: 10)], spacing: 10) {
-                eventMetric("Upcoming events", String(upcomingEvents.count))
-                eventMetric("Expected income", Money.currency(cents: expectedIncome))
-                eventMetric("Expected cost", Money.currency(cents: expectedExpense))
-                eventMetric("Balances due", Money.currency(cents: balancesDue))
+                eventMetric("Upcoming events", String(upcoming.count))
+                eventMetric("Expected income", Money.currency(cents: upcoming.reduce(0) { $0 + $1.budgetIncomeCents }))
+                eventMetric("Expected cost", Money.currency(cents: upcoming.reduce(0) { $0 + $1.budgetExpenseCents }))
+                eventMetric("Balances due", Money.currency(cents: balancesDue(for: upcoming)))
             }
         }
         .foregroundStyle(.white)
@@ -161,7 +185,7 @@ struct EventListView: View {
     }
 
     @ViewBuilder
-    private var calendarWorkspace: some View {
+    private func calendarWorkspace(upcoming: [EventRecord]) -> some View {
 #if os(macOS)
         GeometryReader { proxy in
             HStack(spacing: 0) {
@@ -170,7 +194,7 @@ struct EventListView: View {
 
                 if proxy.size.width >= 850 {
                     Divider()
-                    upcomingEventCards
+                    upcomingEventCards(upcoming: upcoming)
                         .frame(width: 350)
                 }
             }
@@ -180,7 +204,7 @@ struct EventListView: View {
 #endif
     }
 
-    private var upcomingEventCards: some View {
+    private func upcomingEventCards(upcoming upcomingEvents: [EventRecord]) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
@@ -208,6 +232,7 @@ struct EventListView: View {
 
     private func eventSummaryCard(_ event: EventRecord) -> some View {
         let eventParticipants = participants.filter { $0.eventID == event.id }
+        let headcount = Self.rosterHeadcount(eventParticipants)
         let eventBalance = eventParticipants
             .filter { EventCloseoutService.financiallyIncludedStatuses.contains($0.status) }
             .reduce(0) { $0 + max(0, $1.feeCents - $1.paidCents) }
@@ -240,7 +265,7 @@ struct EventListView: View {
                 Divider()
 
                 HStack(spacing: 12) {
-                    eventCardValue("Roster", eventParticipants.isEmpty ? "Not started" : "\(eventParticipants.count) people")
+                    eventCardValue("Roster", eventParticipants.isEmpty ? "Not started" : "\(headcount) people")
                     eventCardValue("Due", Money.currency(cents: eventBalance))
                     eventCardValue("Budget", Money.currency(cents: event.budgetExpenseCents))
                 }
@@ -261,7 +286,7 @@ struct EventListView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var eventList: some View {
+    private func eventList(netByEvent: [UUID: Int64]) -> some View {
         List {
             ForEach(listedEvents) { event in
                 NavigationLink {
@@ -288,7 +313,7 @@ struct EventListView: View {
                                 .foregroundStyle(Color.fieldbookInfo)
                         }
                         if !event.isReadOnly {
-                            MoneyText(cents: eventNet(event), colorBySign: true)
+                            MoneyText(cents: netByEvent[event.id] ?? 0, colorBySign: true)
                         }
                     }
                 }
@@ -296,16 +321,6 @@ struct EventListView: View {
             .onDelete(perform: deleteEvents)
         }
         .searchable(text: $searchText, prompt: "Name, location, coordinator, or category")
-    }
-
-    private func eventNet(_ event: EventRecord) -> Int64 {
-        let importedEntries = eventEntries.filter { $0.eventID == event.id && !$0.isProjected }
-        if !importedEntries.isEmpty {
-            return importedEntries.reduce(0) { partial, entry in
-                partial + (entry.direction == .income ? entry.amountCents : -entry.amountCents)
-            }
-        }
-        return transactions.filter { $0.eventID == event.id }.reduce(0) { $0 + $1.signedAmountCents }
     }
 
     private func eventLocation(_ event: EventRecord) -> String {
@@ -375,7 +390,7 @@ private enum EventPresentation: String, CaseIterable, Identifiable {
     var systemImage: String { self == .calendar ? "calendar" : "list.bullet" }
 }
 
-private struct EventCalendarView: View {
+struct EventCalendarView: View {
     let events: [EventRecord]
     @State private var visibleMonth: Date
     @State private var selectedDate: Date
@@ -383,14 +398,35 @@ private struct EventCalendarView: View {
 
     init(events: [EventRecord]) {
         self.events = events
-        // `events` arrives sorted by start date descending, so `first` would be the farthest-future event.
-        // Fall back to the nearest event that has not ended yet, then to today.
-        let today = Calendar.current.startOfDay(for: Date())
-        let initialDate = events.first(where: { Calendar.current.isDate($0.startDate, equalTo: Date(), toGranularity: .month) })?.startDate
-            ?? events.filter { $0.endDate >= today }.min(by: { $0.startDate < $1.startDate })?.startDate
-            ?? Date()
+        let initialDate = Self.initialSelection(events: events)
         _visibleMonth = State(initialValue: Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: initialDate)) ?? initialDate)
         _selectedDate = State(initialValue: initialDate)
+    }
+
+    /// Today when anything is on the calendar this month; otherwise the start of the nearest event that has not
+    /// ended, then today. Picking the first *record* of the current month (the list is newest-first) opened the
+    /// calendar on the last event of the month instead of today.
+    static func initialSelection(events: [EventRecord], today now: Date = Date(), calendar: Calendar = .current) -> Date {
+        if events.contains(where: { calendar.isDate($0.startDate, equalTo: now, toGranularity: .month) }) { return now }
+        let today = calendar.startOfDay(for: now)
+        return events.filter { $0.endDate >= today }.min(by: { $0.startDate < $1.startDate })?.startDate ?? now
+    }
+
+    /// Events keyed by each day they cover inside `interval`. Building this once per render replaces a scan of
+    /// every event for each of the 42 day cells (and again for the selected day).
+    static func eventsByDay(_ events: [EventRecord], in interval: DateInterval, calendar: Calendar = .current) -> [Date: [EventRecord]] {
+        var buckets: [Date: [EventRecord]] = [:]
+        let lastDay = calendar.startOfDay(for: interval.end.addingTimeInterval(-1))
+        for event in events {
+            var day = max(calendar.startOfDay(for: event.startDate), calendar.startOfDay(for: interval.start))
+            let end = min(calendar.startOfDay(for: event.endDate), lastDay)
+            while day <= end {
+                buckets[day, default: []].append(event)
+                guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+                day = next
+            }
+        }
+        return buckets
     }
 
     private var weekdaySymbols: [String] {
@@ -409,12 +445,13 @@ private struct EventCalendarView: View {
         }
     }
 
-    private var selectedEvents: [EventRecord] {
-        eventsForDay(selectedDate).sorted { $0.startDate < $1.startDate }
-    }
-
     var body: some View {
-        ScrollView {
+        let monthInterval = calendar.dateInterval(of: .month, for: visibleMonth)
+        let eventsByDay = monthInterval.map { Self.eventsByDay(events, in: $0, calendar: calendar) } ?? [:]
+        let selectedDay = calendar.startOfDay(for: selectedDate)
+        let selectedEvents = (monthInterval?.contains(selectedDay) == true ? (eventsByDay[selectedDay] ?? []) : eventsForDay(selectedDate))
+            .sorted { $0.startDate < $1.startDate }
+        return ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
                     Button("Previous month", systemImage: "chevron.left") { moveMonth(-1) }.labelStyle(.iconOnly)
@@ -434,7 +471,7 @@ private struct EventCalendarView: View {
                     }
                     ForEach(Array(days.enumerated()), id: \.offset) { _, date in
                         if let date {
-                            dayCell(date)
+                            dayCell(date, dayEvents: eventsByDay[calendar.startOfDay(for: date)] ?? [])
                         } else {
                             Color.clear.frame(minHeight: 64)
                         }
@@ -482,8 +519,7 @@ private struct EventCalendarView: View {
     }
 
     @ViewBuilder
-    private func dayCell(_ date: Date) -> some View {
-        let dayEvents = eventsForDay(date)
+    private func dayCell(_ date: Date, dayEvents: [EventRecord]) -> some View {
         let selected = calendar.isDate(date, inSameDayAs: selectedDate)
         Button {
             selectedDate = date
@@ -532,10 +568,12 @@ private struct EventCalendarView: View {
 struct EventDetailView: View {
     let event: EventRecord
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \LedgerTransaction.date, order: .reverse) private var allTransactions: [LedgerTransaction]
-    @Query(sort: \EventFinancialEntry.date) private var allEventEntries: [EventFinancialEntry]
+    // Filtered in the store. This screen used to load the entire register, every imported event line, and every
+    // roster row in the database to show one event.
+    @Query private var transactions: [LedgerTransaction]
+    @Query private var eventEntries: [EventFinancialEntry]
     @Query(sort: [SortDescriptor(\PersonRecord.lastName), SortDescriptor(\PersonRecord.firstName)]) private var people: [PersonRecord]
-    @Query private var allParticipants: [EventParticipant]
+    @Query private var queriedParticipants: [EventParticipant]
     @State private var showingEdit = false
     @State private var showingParticipantPicker = false
     @State private var participantToEdit: EventParticipant?
@@ -543,9 +581,24 @@ struct EventDetailView: View {
     @State private var notesError: String?
     @FocusState private var notesFocused: Bool
 
-    private var transactions: [LedgerTransaction] { allTransactions.filter { $0.eventID == event.id } }
-    private var eventEntries: [EventFinancialEntry] { allEventEntries.filter { $0.eventID == event.id } }
-    private var participants: [EventParticipant] { allParticipants.filter { $0.eventID == event.id } }
+    init(event: EventRecord) {
+        self.event = event
+        let eventID: UUID? = event.id
+        _transactions = Query(filter: #Predicate<LedgerTransaction> { $0.eventID == eventID }, sort: \LedgerTransaction.date, order: .reverse)
+        _eventEntries = Query(filter: #Predicate<EventFinancialEntry> { $0.eventID == eventID }, sort: \EventFinancialEntry.date)
+        _queriedParticipants = Query(filter: #Predicate<EventParticipant> { $0.eventID == eventID }, sort: \EventParticipant.createdAt)
+    }
+
+    private var participants: [EventParticipant] { Self.ordered(queriedParticipants) }
+
+    /// The roster list had no sort at all, so its order (and the row a swipe-to-delete removed) depended on
+    /// store order, which differs between devices after a sync. Order by when people were added, then by id.
+    static func ordered(_ participants: [EventParticipant]) -> [EventParticipant] {
+        participants.sorted {
+            if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+    }
     /// Same rule as the event list and the close-out service: imported actuals win only when there are
     /// non-projected entries. Deciding on "any entries" showed $0.00 for a worksheet of projections whose real
     /// money lived in linked ledger transactions.
@@ -880,6 +933,7 @@ struct EventFormView: View {
     @State private var notes: String
     @State private var dateIsApproximate: Bool
     @State private var errorMessage: String?
+    @State private var isSaving = false
 
     init(event: EventRecord? = nil) {
         self.event = event
@@ -927,7 +981,8 @@ struct EventFormView: View {
                     DatePicker("Ends", selection: $endDate, in: startDate..., displayedComponents: isAllDay ? [.date] : [.date, .hourAndMinute])
                     Toggle("Dates are approximate", isOn: $dateIsApproximate)
                     Toggle("Registration deadline", isOn: $hasDeadline)
-                    if hasDeadline { DatePicker("Deadline", selection: $registrationDeadline) }
+                    // The policy rejects a deadline after the start; offering later dates silently disabled Save.
+                    if hasDeadline { DatePicker("Deadline", selection: $registrationDeadline, in: ...startDate) }
                 }
                 Section("Location") {
                     TextField("Place or venue", text: $location)
@@ -959,7 +1014,7 @@ struct EventFormView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(!canSave) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(!canSave || isSaving) }
             }
         }
         .frame(minWidth: 520, minHeight: 760)
@@ -1004,6 +1059,10 @@ struct EventFormView: View {
     }
 
     private func save() {
+        // A second click during the sheet's dismissal re-entered save() and created the event twice.
+        guard !isSaving else { return }
+        isSaving = true
+        defer { if errorMessage != nil { isSaving = false } }
         do {
             guard let income = Money.cents(from: budgetIncome), let expense = Money.cents(from: budgetExpense) else {
                 throw EventDraftValidationError.negativeBudget

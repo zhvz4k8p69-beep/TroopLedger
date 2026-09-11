@@ -95,6 +95,9 @@ enum DataResetService {
                 in: modelContext
             )
             try modelContext.save()
+            // The troop profile is gone; the iOS actor fallback must stop naming its treasurer on every
+            // entry written after the reset until the app is relaunched or the profile is edited.
+            AuditLogger.invalidateTreasurerIdentity()
             return Result(deletedRecordCount: deletedRecordCount)
         } catch {
             modelContext.rollback()

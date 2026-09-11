@@ -62,7 +62,10 @@ struct AuditLogView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        // The filter substring-searches five fields of every entry; it was evaluated twice per keystroke
+        // (once to decide emptiness, once to build the list).
+        let filteredEntries = self.filteredEntries
+        return VStack(spacing: 0) {
             Picker("Action", selection: $actionFilter) {
                 Text("All Actions").tag(nil as AuditAction?)
                 ForEach(AuditAction.allCases) { action in

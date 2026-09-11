@@ -300,7 +300,11 @@ enum EventCloseoutService {
                 proposedAdjustmentCents: perPerson - participant.feeCents
             )
         }.sorted { (lhs: EventCloseoutPreview.Participant, rhs: EventCloseoutPreview.Participant) in
-            lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            // The preview order is persisted as the close-out allocation order; two guests with the same
+            // name must not come out in a different order on each run.
+            let byName = lhs.name.localizedStandardCompare(rhs.name)
+            if byName != .orderedSame { return byName == .orderedAscending }
+            return lhs.participantID.uuidString < rhs.participantID.uuidString
         }
         return EventCloseoutPreview(
             eventID: event.id,

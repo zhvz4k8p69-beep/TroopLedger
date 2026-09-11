@@ -81,7 +81,12 @@ struct PeopleListView: View {
     }
 
     var body: some View {
-        List {
+        // The filter ran twice per render and the inactive-balance banner rebuilt the member-balance map three
+        // times; on top of the list's own pass that was four walks of the member ledger per keystroke.
+        let balances = FinanceEngine.memberBalances(entries: entries)
+        let filtered = self.filtered
+        let inactive = Self.inactiveBalanceSummary(people: people, balances: balances)
+        return List {
             Section {
                 Picker("People status", selection: $activityFilter) {
                     ForEach(PersonActivityFilter.allCases) { filter in
@@ -106,16 +111,13 @@ struct PeopleListView: View {
                 }
             }
 
-            if activityFilter == .active, inactiveBalances.count > 0 {
+            if activityFilter == .active, inactive.count > 0 {
                 Section {
                     Button {
                         activityFilter = .inactive
                     } label: {
-                        Label(
-                            "\(inactiveBalances.count) inactive \(inactiveBalances.count == 1 ? "person" : "people") still carry balances totaling \(Money.currency(cents: inactiveBalances.total))",
-                            systemImage: "exclamationmark.circle"
-                        )
-                        .foregroundStyle(.orange)
+                        Label(Self.inactiveBalanceMessage(inactive), systemImage: "exclamationmark.circle")
+                            .foregroundStyle(.orange)
                     }
                 }
             }
@@ -128,7 +130,6 @@ struct PeopleListView: View {
                 }
                 .listRowBackground(Color.clear)
             } else {
-                let balances = FinanceEngine.memberBalances(entries: entries)
                 ForEach(filtered) { person in
                     NavigationLink(value: person) {
                         HStack {
@@ -184,13 +185,32 @@ struct PeopleListView: View {
         }
     }
 
-    /// The default Active filter hid money still owed by or to families who left.
-    private var inactiveBalances: (count: Int, total: Int64) {
-        let byPerson = FinanceEngine.memberBalances(entries: entries)
-        let balances = people.filter { !$0.isActive }
-            .compactMap { byPerson[$0.id] }
-            .filter { $0 != 0 }
-        return (balances.count, balances.reduce(0, +))
+    struct InactiveBalanceSummary: Equatable {
+        let count: Int
+        let dueCents: Int64
+        let creditCents: Int64
+    }
+
+    /// The default Active filter hid money still owed by or to families who left. Amounts due and credits are
+    /// kept apart: netting them reported "2 people still carry balances totaling $0.00" when one family owed
+    /// exactly what another was owed.
+    static func inactiveBalanceSummary(people: [PersonRecord], balances: [UUID: Int64]) -> InactiveBalanceSummary {
+        var count = 0
+        var due: Int64 = 0
+        var credit: Int64 = 0
+        for person in people where !person.isActive {
+            guard let balance = balances[person.id], balance != 0 else { continue }
+            count += 1
+            if balance > 0 { due += balance } else { credit -= balance }
+        }
+        return InactiveBalanceSummary(count: count, dueCents: due, creditCents: credit)
+    }
+
+    static func inactiveBalanceMessage(_ summary: InactiveBalanceSummary) -> String {
+        var parts: [String] = []
+        if summary.dueCents > 0 { parts.append("\(Money.currency(cents: summary.dueCents)) due") }
+        if summary.creditCents > 0 { parts.append("\(Money.currency(cents: summary.creditCents)) in credits") }
+        return "\(summary.count) inactive \(summary.count == 1 ? "person" : "people") still carry balances: \(parts.joined(separator: ", "))"
     }
 
     private var emptyTitle: String {
@@ -260,8 +280,9 @@ struct PeopleListView: View {
 struct PersonDetailView: View {
     let person: PersonRecord
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \MemberLedgerEntry.date, order: .reverse) private var allEntries: [MemberLedgerEntry]
-    @Query(sort: \RegistrationRecord.registeredOn, order: .reverse) private var allRegistrations: [RegistrationRecord]
+    // Filtered in the store; this screen used to load the whole member ledger and every registration for one person.
+    @Query private var entries: [MemberLedgerEntry]
+    @Query private var registrations: [RegistrationRecord]
     @Query private var events: [EventRecord]
     @Query private var chargeAllocations: [RecurringChargeAllocationRecord]
     @State private var showingEdit = false
@@ -271,11 +292,17 @@ struct PersonDetailView: View {
     @State private var pendingRegistrationDeletion: RegistrationRecord?
     @State private var errorMessage: String?
 
-    private var entries: [MemberLedgerEntry] { allEntries.filter { $0.personID == person.id } }
-    private var registrations: [RegistrationRecord] { allRegistrations.filter { $0.personID == person.id } }
+    init(person: PersonRecord) {
+        self.person = person
+        let personID: UUID? = person.id
+        _entries = Query(filter: #Predicate<MemberLedgerEntry> { $0.personID == personID }, sort: \MemberLedgerEntry.date, order: .reverse)
+        _registrations = Query(filter: #Predicate<RegistrationRecord> { $0.personID == personID }, sort: \RegistrationRecord.registeredOn, order: .reverse)
+    }
 
     var body: some View {
-        List {
+        // Each ledger row used to search every event for its name.
+        let eventNames = Dictionary(events.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        return List {
             Section {
                 LabeledContent("Role", value: person.role.rawValue)
                 if person.role == .scout {
@@ -321,7 +348,7 @@ struct PersonDetailView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(entry.category).font(.headline)
-                                Text("\(entry.kind.rawValue) • \(entry.date.formatted(date: .abbreviated, time: .omitted))\(eventName(entry.eventID).map { " • \($0)" } ?? "")")
+                                Text("\(entry.kind.rawValue) • \(entry.date.formatted(date: .abbreviated, time: .omitted))\(entry.eventID.flatMap { eventNames[$0] }.map { " • \($0)" } ?? "")")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 if entry.kind == .payment {
@@ -371,8 +398,6 @@ struct PersonDetailView: View {
             get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
         )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
     }
-
-    private func eventName(_ id: UUID?) -> String? { events.first(where: { $0.id == id })?.name }
 
     private func requestRegistrationDeletion(at offsets: IndexSet) {
         guard let index = offsets.first else { return }
@@ -426,6 +451,7 @@ struct PersonFormView: View {
     @State private var notes: String
     @State private var showingPositions = false
     @State private var errorMessage: String?
+    @State private var isSaving = false
 
     init(person: PersonRecord? = nil) {
         self.person = person
@@ -493,7 +519,7 @@ struct PersonFormView: View {
             .navigationTitle(person == nil ? "New Person" : "Edit Person")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(firstName.trimmingCharacters(in: .whitespaces).isEmpty && lastName.trimmingCharacters(in: .whitespaces).isEmpty) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(isSaving || (firstName.trimmingCharacters(in: .whitespaces).isEmpty && lastName.trimmingCharacters(in: .whitespaces).isEmpty)) }
             }
         }
         .frame(minWidth: 450, minHeight: 560)
@@ -531,6 +557,10 @@ struct PersonFormView: View {
     }
 
     private func save() {
+        // A second click during the sheet's dismissal re-entered save() and created the person twice.
+        guard !isSaving else { return }
+        isSaving = true
+        defer { if errorMessage != nil { isSaving = false } }
         do {
             try PersonPolicy.validate(firstName: firstName, lastName: lastName, memberID: memberID, editingPersonID: person?.id, people: people)
             let record = person ?? PersonRecord(firstName: firstName, lastName: lastName, role: role)
@@ -654,8 +684,16 @@ struct MemberEntryFormView: View {
     @State private var eventID: UUID?
     @State private var notes = ""
     @State private var errorMessage: String?
+    @State private var isSaving = false
 
     private var isAdjustment: Bool { kind == .adjustmentIncrease || kind == .adjustmentDecrease }
+
+    /// A payment records money that has arrived; dating one in the future showed a family as paid up for cash
+    /// the troop does not have yet. Charges and adjustments may carry a future due date.
+    static func dateIssue(kind: MemberEntryKind, date: Date, now: Date = Date(), calendar: Calendar = .current) -> String? {
+        guard kind == .payment, calendar.startOfDay(for: date) > calendar.startOfDay(for: now) else { return nil }
+        return "A payment cannot be dated in the future. Record it on the day the money was received."
+    }
 
     /// Income received from this person in the bank ledger that no other member-ledger payment claims yet.
     private var receiptCandidates: [LedgerTransaction] {
@@ -666,11 +704,23 @@ struct MemberEntryFormView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        // The candidate list scanned the register and the member ledger on each of its three reads per render.
+        let receiptCandidates = self.receiptCandidates
+        let dateIssue = Self.dateIssue(kind: kind, date: date)
+        return NavigationStack {
             Form {
                 Section("Entry") {
                     LabeledContent("Person", value: person.displayName)
-                    DatePicker("Date", selection: $date, displayedComponents: .date)
+                    if kind == .payment {
+                        DatePicker("Date", selection: $date, in: ...Date(), displayedComponents: .date)
+                    } else {
+                        DatePicker("Date", selection: $date, displayedComponents: .date)
+                    }
+                    if let dateIssue {
+                        Label(dateIssue, systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
                     Picker("Type", selection: $kind) { ForEach(MemberEntryKind.allCases) { Text($0.rawValue).tag($0) } }
                     AmountField(title: "Amount", text: $amount)
                     TextField("Category", text: $category)
@@ -708,7 +758,7 @@ struct MemberEntryFormView: View {
             .navigationTitle("Member Ledger Entry")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(!canSave) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(!canSave || isSaving) }
             }
         }
         .frame(minWidth: 450, minHeight: 480)
@@ -718,10 +768,15 @@ struct MemberEntryFormView: View {
     }
 
     private var canSave: Bool {
-        (try? MemberEntryPolicy.validate(kind: kind, amountCents: Money.cents(from: amount), category: category, notes: notes)) != nil
+        Self.dateIssue(kind: kind, date: date) == nil
+            && (try? MemberEntryPolicy.validate(kind: kind, amountCents: Money.cents(from: amount), category: category, notes: notes)) != nil
     }
 
     private func save() {
+        // A second click during the sheet's dismissal re-entered save() and posted the charge or payment twice.
+        guard !isSaving, canSave else { return }
+        isSaving = true
+        defer { if errorMessage != nil { isSaving = false } }
         do {
             let cents = Money.cents(from: amount)
             try MemberEntryPolicy.validate(kind: kind, amountCents: cents, category: category, notes: notes)
@@ -794,13 +849,20 @@ struct RegistrationFormView: View {
                     Picker("Status", selection: $status) { ForEach(RegistrationStatus.allCases) { Text($0.rawValue).tag($0) } }
                     DatePicker("Registered", selection: $registeredOn, displayedComponents: .date)
                     Toggle("Has expiration date", isOn: $hasExpiration)
-                    if hasExpiration { DatePicker("Expires", selection: $expiresOn, displayedComponents: .date) }
+                    if hasExpiration { DatePicker("Expires", selection: $expiresOn, in: registeredOn..., displayedComponents: .date) }
                     AmountField(title: "Dues assessed", text: $dues)
                 }
                 Section("Notes") { TextField("Optional notes", text: $notes, axis: .vertical) }
             }
             .formStyle(.grouped)
             .navigationTitle(registration == nil ? "New Registration" : "Edit Registration")
+            // The policy rejects an expiration before the registration date. Moving Registered past Expires, or
+            // enabling an expiration on an old registration (which defaulted to today, before it), disabled
+            // Save with no explanation.
+            .onChange(of: registeredOn) { _, newValue in expiresOn = Self.adjustedExpiration(expiresOn, registeredOn: newValue) }
+            .onChange(of: hasExpiration) { _, enabled in
+                if enabled { expiresOn = Self.adjustedExpiration(expiresOn, registeredOn: registeredOn) }
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(!canSave) }
@@ -815,6 +877,10 @@ struct RegistrationFormView: View {
         } message: {
             Text(errorMessage ?? "")
         }
+    }
+
+    static func adjustedExpiration(_ expiresOn: Date, registeredOn: Date, calendar: Calendar = .current) -> Date {
+        calendar.startOfDay(for: expiresOn) < calendar.startOfDay(for: registeredOn) ? registeredOn : expiresOn
     }
 
     private var canSave: Bool {

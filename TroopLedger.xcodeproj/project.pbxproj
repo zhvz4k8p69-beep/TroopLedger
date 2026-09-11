@@ -75,6 +75,8 @@
 		B19A7B23F463202DBD3E7B25 /* AuditLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58D3D25BAA593F0AA5F1A7B1 /* AuditLogger.swift */; };
 		B240C877217D46E9D54C168F /* ScoutbookCalendarService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8FE52BF25C11116DB12779F /* ScoutbookCalendarService.swift */; };
 		B285E02BE329F4DB12A12AF3 /* FinanceEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B830E64ABA834C4C3C77314 /* FinanceEngineTests.swift */; };
+		C5B4A3928170F6E5D4C3B2A2 /* TenthRoundViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5D /* TenthRoundViewTests.swift */; };
+		C5B4A3928170F6E5D4C3B2A1 /* TenthRoundServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5C /* TenthRoundServiceTests.swift */; };
 		B819DAD71E13FA537B2898A6 /* EventLocationMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C555F5F9DA2F95AE74AE3E59 /* EventLocationMapView.swift */; };
 		B8F3DD01FD0057BB1B1EF3AB /* SharedViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A6793BEE0C84E9FF64659B1 /* SharedViews.swift */; };
 		BD7AD258291C3186E821ACA9 /* ReimbursementApprovalReportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77A64EEE5FEBEEEF8D32C6C0 /* ReimbursementApprovalReportView.swift */; };
@@ -130,6 +132,8 @@
 		26E60954A5EBA340426F5F77 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		2A6793BEE0C84E9FF64659B1 /* SharedViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedViews.swift; sourceTree = "<group>"; };
 		2B830E64ABA834C4C3C77314 /* FinanceEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinanceEngineTests.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F60718293A4B5D /* TenthRoundViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TenthRoundViewTests.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F60718293A4B5C /* TenthRoundServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TenthRoundServiceTests.swift; sourceTree = "<group>"; };
 		34681DA8053040F1E26312D9 /* EventRosterPrinter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventRosterPrinter.swift; sourceTree = "<group>"; };
 		36FA50134121AB82E21A3E87 /* ScoutbookIntegrationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScoutbookIntegrationView.swift; sourceTree = "<group>"; };
 		432534D781392BA47BFDFC59 /* TransactionViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionViews.swift; sourceTree = "<group>"; };
@@ -223,6 +227,8 @@
 			isa = PBXGroup;
 			children = (
 				2B830E64ABA834C4C3C77314 /* FinanceEngineTests.swift */,
+				A1B2C3D4E5F60718293A4B5D /* TenthRoundViewTests.swift */,
+				A1B2C3D4E5F60718293A4B5C /* TenthRoundServiceTests.swift */,
 			);
 			path = TroopLedgerTests;
 			sourceTree = "<group>";
@@ -415,6 +421,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				B285E02BE329F4DB12A12AF3 /* FinanceEngineTests.swift in Sources */,
+				C5B4A3928170F6E5D4C3B2A2 /* TenthRoundViewTests.swift in Sources */,
+				C5B4A3928170F6E5D4C3B2A1 /* TenthRoundServiceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -550,6 +558,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.bettnet.TroopLedger;
 				PRODUCT_NAME = TroopLedger;
 				SDKROOT = iphoneos;
@@ -575,6 +584,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.bettnet.TroopLedger;
 				PRODUCT_NAME = TroopLedger;
 				SDKROOT = macosx;
@@ -584,17 +594,18 @@
 		39E256E9ACD43210CC738CCE /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				EXCLUDED_SOURCE_FILE_NAMES = TroopFinanceImport.json;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Configuration/TroopLedger.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				DEVELOPMENT_TEAM = YYNDN9V2A4;
+				EXCLUDED_SOURCE_FILE_NAMES = TroopFinanceImport.json;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Configuration/TroopLedger-iOS-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.bettnet.TroopLedger;
 				PRODUCT_NAME = TroopLedger;
 				SDKROOT = iphoneos;
@@ -775,7 +786,6 @@
 		CAE432D570429D977E9C4832 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				EXCLUDED_SOURCE_FILE_NAMES = TroopFinanceImport.json;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Configuration/TroopLedger-macOS.entitlements";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
@@ -784,12 +794,14 @@
 				DEVELOPMENT_TEAM = YYNDN9V2A4;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
+				EXCLUDED_SOURCE_FILE_NAMES = TroopFinanceImport.json;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Configuration/TroopLedger-macOS-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.bettnet.TroopLedger;
 				PRODUCT_NAME = TroopLedger;
 				SDKROOT = macosx;

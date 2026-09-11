@@ -294,8 +294,15 @@ enum BatchDepositService {
         }
     }
 
-    private static func normalized(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Folds a payer name for matching against the roster. Spreadsheets write "Smith, John" and stray
+    /// double spaces; a receipt for either used to match nobody and lose its member credit.
+    static func normalized(_ value: String) -> String {
+        var name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let comma = name.firstIndex(of: ",") {
+            name = "\(name[name.index(after: comma)...]) \(name[..<comma])"
+        }
+        return name.split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 }
@@ -361,12 +368,17 @@ enum AccountTransferService {
         guard source.kind != .undepositedFunds, destination.kind != .undepositedFunds else {
             throw AccountTransferError.undepositedFundsNotAllowed
         }
-        // A cash box cannot send more than it holds.
-        let existingTransactions = try modelContext.fetch(FetchDescriptor<LedgerTransaction>())
-        do {
-            try HoldingAccountPolicy.validate(account: source, transactions: existingTransactions, editing: nil, direction: .expense, amountCents: amountCents)
-        } catch {
-            throw AccountTransferError.wouldOverdraw(error.localizedDescription)
+        // A cash box cannot send more than it holds. Only holding accounts are checked, so the whole
+        // register is not faulted in for the common checking-to-savings move; the policy needs just the
+        // source account's rows.
+        if source.kind == .cash || source.kind == .undepositedFunds {
+            let sourceID: UUID? = source.id
+            let existingTransactions = try modelContext.fetch(FetchDescriptor<LedgerTransaction>(predicate: #Predicate { $0.accountID == sourceID }))
+            do {
+                try HoldingAccountPolicy.validate(account: source, transactions: existingTransactions, editing: nil, direction: .expense, amountCents: amountCents)
+            } catch {
+                throw AccountTransferError.wouldOverdraw(error.localizedDescription)
+            }
         }
         if let lock = PeriodLocking.latestLockDate(for: source.id, reconciliations: reconciliations, calendar: calendar),
            calendar.startOfDay(for: date) <= lock {
@@ -425,6 +437,16 @@ enum AccountTransferService {
             throw AccountTransferError.notDeletable
         }
         let accounts = try modelContext.fetch(FetchDescriptor<AccountRecord>())
+        // Deleting the leg that carried money into a cash box takes that money back out; the box must not be
+        // left holding less than it has since paid out, exactly as deleting an ordinary receipt is refused.
+        for leg in legs where leg.direction == .income {
+            guard let account = accounts.first(where: { $0.id == leg.accountID }) else { continue }
+            do {
+                try HoldingAccountPolicy.validateRemoval(of: leg, from: account, transactions: transactions)
+            } catch {
+                throw AccountTransferError.wouldOverdraw(error.localizedDescription)
+            }
+        }
         let description = legs.map { leg in
             "\(accounts.first { $0.id == leg.accountID }?.name ?? "Unknown account") \(Money.currency(cents: leg.signedAmountCents))"
         }.joined(separator: "; ")

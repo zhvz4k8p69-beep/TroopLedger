@@ -30,7 +30,6 @@ struct ReconciliationView: View {
         )
     }
     private var statementCents: Int64? { Money.cents(from: endingBalance) }
-    private var difference: Int64? { statementCents.map { $0 - clearedBalance } }
     private var lockedThrough: Date? {
         PeriodLocking.latestLockDate(for: accountID, reconciliations: reconciliations)
     }
@@ -43,7 +42,12 @@ struct ReconciliationView: View {
     }
 
     var body: some View {
-        content
+        // `eligible` and `clearedBalance` each walk the whole register; they were evaluated up to five times
+        // per render (progress rows, difference, the toolbar button, and the outstanding list) on every keystroke.
+        let eligible = self.eligible
+        let clearedBalance = self.clearedBalance
+        let difference = statementCents.map { $0 - clearedBalance }
+        return content(eligible: eligible, clearedBalance: clearedBalance, difference: difference)
         .pageToolbar(title: "Reconcile") {
             Button("Finish Reconciliation", systemImage: "checkmark.seal", action: finish)
                 .disabled(account == nil || statementCents == nil || difference != 0 || !statementDateIsAfterLock || statementDateIsInFuture)
@@ -75,14 +79,14 @@ struct ReconciliationView: View {
     }
 
     @ViewBuilder
-    private var content: some View {
+    private func content(eligible: [LedgerTransaction], clearedBalance: Int64, difference: Int64?) -> some View {
         if accounts.isEmpty {
             EmptyMessage(title: "No account to reconcile", message: "Add the checking account before starting a reconciliation.", systemImage: "checkmark.seal")
         } else {
             List {
                 statementSection
-                progressSection
-                outstandingSection
+                progressSection(clearedBalance: clearedBalance, difference: difference)
+                outstandingSection(eligible: eligible)
                 recentSection
             }
         }
@@ -105,7 +109,7 @@ struct ReconciliationView: View {
         }
     }
 
-    private var progressSection: some View {
+    private func progressSection(clearedBalance: Int64, difference: Int64?) -> some View {
         Section("Progress") {
             LabeledContent("Cleared balance") { MoneyText(cents: clearedBalance) }
             LabeledContent("Difference") { MoneyText(cents: difference ?? 0, colorBySign: true) }
@@ -128,7 +132,7 @@ struct ReconciliationView: View {
     }
 
     @ViewBuilder
-    private var outstandingSection: some View {
+    private func outstandingSection(eligible: [LedgerTransaction]) -> some View {
         Section("Outstanding Transactions") {
             if eligible.isEmpty {
                 Text("No uncleared transactions through this date.").foregroundStyle(.secondary)
@@ -191,6 +195,20 @@ struct ReconciliationView: View {
         return calendar.date(byAdding: .day, value: -1, to: monthStart) ?? date
     }
 
+    /// After a statement is finished the next one to reconcile ends a month later. Leaving the date on the
+    /// just-locked statement left the screen saying "Choose a statement date after the current lock" with the
+    /// Finish button disabled, as if the reconciliation had failed.
+    static func nextStatementDate(after statementDate: Date, now: Date = Date(), calendar: Calendar = .current) -> Date {
+        let today = calendar.startOfDay(for: now)
+        guard let nextMonth = calendar.date(byAdding: .month, value: 1, to: statementDate),
+              let followingMonthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: nextMonth)),
+              let monthAfterNext = calendar.date(byAdding: .month, value: 1, to: followingMonthStart),
+              let endOfNextMonth = calendar.date(byAdding: .day, value: -1, to: monthAfterNext) else {
+            return today
+        }
+        return min(endOfNextMonth, today)
+    }
+
     private func moveStatementDatePastLock() {
         statementDate = PeriodLocking.firstUnlockedDate(
             for: accountID,
@@ -248,6 +266,8 @@ struct ReconciliationView: View {
             try modelContext.save()
             selected.removeAll()
             notes = ""
+            endingBalance = "0.00"
+            statementDate = Self.nextStatementDate(after: statementDate)
             showingReconciliationMilestone = true
         } catch {
             errorMessage = error.localizedDescription

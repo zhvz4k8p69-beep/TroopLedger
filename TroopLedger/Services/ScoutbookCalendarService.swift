@@ -120,8 +120,9 @@ enum ScoutbookCalendarService {
     }
 
     static func parse(data: Data) throws -> [ScoutbookCalendarEvent] {
+        // A case-insensitive search instead of upper-casing a copy of the whole (up to 5 MB) feed.
         guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1),
-              text.uppercased().contains("BEGIN:VCALENDAR") else {
+              text.range(of: "BEGIN:VCALENDAR", options: .caseInsensitive) != nil else {
             throw ScoutbookCalendarError.unreadableFeed
         }
         let lines = unfoldLines(text)
@@ -313,9 +314,17 @@ enum ScoutbookCalendarService {
             event.category = "Scoutbook Calendar"
             event.startDate = source.startDate
             event.endDate = source.endDate
-            event.location = source.location
+            // Like notes, a location typed while the event was detached survives a feed that has none, and a
+            // registration status set locally is not knocked back to Planning by the re-attach.
+            if !(wasDetached && source.location.isEmpty) { event.location = source.location }
             if !(wasDetached && source.notes.isEmpty) { event.notes = source.notes }
-            if event.closedAt == nil { event.status = source.isCancelled ? .cancelled : .planning }
+            if event.closedAt == nil {
+                if source.isCancelled {
+                    event.status = .cancelled
+                } else if !wasDetached || event.status == .cancelled {
+                    event.status = .planning
+                }
+            }
             event.dateIsApproximate = false
             event.sourceSystem = "Scoutbook Calendar"
             event.externalSourceID = source.externalID
@@ -552,8 +561,17 @@ enum ScoutbookCalendarService {
         return sign * total
     }
 
+    /// RFC 5545 recurrence arithmetic is Gregorian: "the 15th of every month" or "every second week" must
+    /// not follow the device's Hebrew or Islamic months. Built per recurring event so the zone stays current.
+    private static var recurrenceCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        return calendar
+    }
+
     private static func expand(_ event: ScoutbookCalendarEvent, rule: String?, exclusions: [Date] = []) -> [ScoutbookCalendarEvent] {
-        let calendarForExclusions = Calendar.current
+        var calendar = recurrenceCalendar
+        let calendarForExclusions = calendar
         func isExcluded(_ start: Date) -> Bool {
             exclusions.contains { excluded in
                 event.isAllDay ? calendarForExclusions.isDate(excluded, inSameDayAs: start) : abs(excluded.timeIntervalSince(start)) < 1
@@ -566,15 +584,17 @@ enum ScoutbookCalendarService {
             return pair.count == 2 ? (pair[0].uppercased(), pair[1]) : nil
         }, uniquingKeysWith: { first, _ in first })
         guard let frequency = values["FREQ"]?.uppercased() else { return [event] }
+        // Weeks start on the rule's WKST day (RFC 5545 default: Monday), not on the device locale's first weekday.
+        calendar.firstWeekday = ["SU": 1, "MO": 2, "TU": 3, "WE": 4, "TH": 5, "FR": 6, "SA": 7][values["WKST"]?.uppercased() ?? "MO"] ?? 2
         let interval = max(1, Int(values["INTERVAL"] ?? "1") ?? 1)
         let count = min(500, max(1, Int(values["COUNT"] ?? "500") ?? 500))
         // A date-only UNTIL covers its whole day; treating it as midnight dropped the final occurrence.
         let until: Date? = values["UNTIL"].flatMap { value in
             guard let parsed = parseDate(value, parameters: [:]) else { return nil }
-            guard parsed.isDateOnly, let nextDay = Calendar.current.date(byAdding: .day, value: 1, to: parsed.date) else { return parsed.date }
+            guard parsed.isDateOnly, let nextDay = calendar.date(byAdding: .day, value: 1, to: parsed.date) else { return parsed.date }
             return nextDay.addingTimeInterval(-1)
         }
-        let horizon = Calendar.current.date(byAdding: .year, value: 2, to: Date()) ?? Date().addingTimeInterval(63_072_000)
+        let horizon = calendar.date(byAdding: .year, value: 2, to: Date()) ?? Date().addingTimeInterval(63_072_000)
         let component: Calendar.Component
         switch frequency {
         case "DAILY": component = .day
@@ -584,7 +604,6 @@ enum ScoutbookCalendarService {
         default: return [event]
         }
 
-        let calendar = Calendar.current
         let duration = event.endDate.timeIntervalSince(event.startDate)
         // All-day spans are measured in calendar days; adding raw seconds shifts the end by an hour across a
         // daylight-saving change and drops the last day of a multi-day occurrence.
@@ -711,13 +730,18 @@ enum ScoutbookCalendarService {
         }
 
         var results: [ScoutbookCalendarEvent] = []
-        for start in candidates() {
+        let starts = candidates()
+        for start in starts {
             if let until, start > until { break }
             if start > horizon { break }
             if isExcluded(start) { continue }
             results.append(occurrence(startingAt: start))
         }
-        return results.isEmpty ? [event] : results
+        // A rule that yields no dates at all still contributes its DTSTART (RFC 5545 always includes it). A
+        // rule whose every occurrence was struck by EXDATE yields nothing; falling back to the base event
+        // resurrected a meeting that the feed had explicitly cancelled.
+        if results.isEmpty { return starts.isEmpty ? [event] : [] }
+        return results
     }
 
     private static func stableID(_ value: String) -> String {

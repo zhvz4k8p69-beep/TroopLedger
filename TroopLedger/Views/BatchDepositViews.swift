@@ -97,7 +97,7 @@ struct BatchDepositListView: View {
     }
 }
 
-private struct BatchDepositBuilderView: View {
+struct BatchDepositBuilderView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \AccountRecord.name) private var accounts: [AccountRecord]
@@ -133,15 +133,22 @@ private struct BatchDepositBuilderView: View {
         BatchDepositService.eligibleCashReceipts(receipts: cashReceipts, allocations: allocations)
     }
 
-    private var selectedTotal: Int64 {
-        eligibleTransactions.filter { selectedTransactionIDs.contains($0.id) }.reduce(0) { $0 + $1.amountCents }
-            + eligibleCashReceipts.filter { selectedCashReceiptIDs.contains($0.id) }.reduce(0) { $0 + $1.amountCents }
-    }
-
     private var selectedCount: Int { selectedTransactionIDs.count + selectedCashReceiptIDs.count }
 
+    /// The service refuses a batch containing a receipt dated after the deposit; the builder used to offer such
+    /// receipts anyway and reported the problem only after the treasurer had pressed Post.
+    static func isReceivedAfterDeposit(received: Date, depositDate: Date, calendar: Calendar = .current) -> Bool {
+        calendar.startOfDay(for: received) > calendar.startOfDay(for: depositDate)
+    }
+
     var body: some View {
-        NavigationStack {
+        // Both eligibility lists rebuild a set of every allocation and filter their table; they were evaluated
+        // three or four times per render (emptiness, the rows, the total, the Post button).
+        let eligibleTransactions = self.eligibleTransactions
+        let eligibleCashReceipts = self.eligibleCashReceipts
+        let selectedTotal = eligibleTransactions.filter { selectedTransactionIDs.contains($0.id) }.reduce(0) { $0 + $1.amountCents }
+            + eligibleCashReceipts.filter { selectedCashReceiptIDs.contains($0.id) }.reduce(0) { $0 + $1.amountCents }
+        return NavigationStack {
             Form {
                 Section("Bank Deposit") {
                     Picker("Deposit to", selection: $destinationAccountID) {
@@ -164,7 +171,8 @@ private struct BatchDepositBuilderView: View {
                                 selected: $selectedTransactionIDs,
                                 title: transaction.payee.isEmpty ? transaction.category : transaction.payee,
                                 detail: "\(transaction.date.formatted(date: .abbreviated, time: .omitted)) • \(transaction.category)",
-                                amount: transaction.amountCents
+                                amount: transaction.amountCents,
+                                receivedAfterDeposit: Self.isReceivedAfterDeposit(received: transaction.date, depositDate: depositDate)
                             )
                         }
                     }
@@ -181,7 +189,8 @@ private struct BatchDepositBuilderView: View {
                                 selected: $selectedCashReceiptIDs,
                                 title: receipt.personName.isEmpty ? receipt.purpose : receipt.personName,
                                 detail: "\(receipt.date.formatted(date: .abbreviated, time: .omitted)) • \(receipt.purpose) • \(receipt.paymentKind)",
-                                amount: receipt.amountCents
+                                amount: receipt.amountCents,
+                                receivedAfterDeposit: Self.isReceivedAfterDeposit(received: receipt.date, depositDate: depositDate)
                             )
                         }
                     }
@@ -214,6 +223,13 @@ private struct BatchDepositBuilderView: View {
                 }
             }
             .onAppear { destinationAccountID = destinationAccountID ?? AccountSelectionPolicy.defaultOperatingAccount(in: destinations)?.id ?? destinations.first?.id }
+            // Moving the deposit date earlier can strand already-ticked receipts on the wrong side of it.
+            .onChange(of: depositDate) { _, newDate in
+                let lateTransactions = eligibleTransactions.filter { Self.isReceivedAfterDeposit(received: $0.date, depositDate: newDate) }.map(\.id)
+                let lateReceipts = eligibleCashReceipts.filter { Self.isReceivedAfterDeposit(received: $0.date, depositDate: newDate) }.map(\.id)
+                selectedTransactionIDs.subtract(lateTransactions)
+                selectedCashReceiptIDs.subtract(lateReceipts)
+            }
         }
         .frame(minWidth: 560, minHeight: 700)
         .alert("Deposit Batch", isPresented: Binding(
@@ -226,7 +242,8 @@ private struct BatchDepositBuilderView: View {
         selected: Binding<Set<UUID>>,
         title: String,
         detail: String,
-        amount: Int64
+        amount: Int64,
+        receivedAfterDeposit: Bool
     ) -> some View {
         Button {
             if selected.wrappedValue.contains(id) { selected.wrappedValue.remove(id) }
@@ -238,6 +255,11 @@ private struct BatchDepositBuilderView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                     Text(detail).font(.caption).foregroundStyle(.secondary)
+                    if receivedAfterDeposit {
+                        Label("Received after the deposit date", systemImage: "calendar.badge.exclamationmark")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
                 }
                 Spacer()
                 MoneyText(cents: amount)
@@ -245,6 +267,7 @@ private struct BatchDepositBuilderView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(receivedAfterDeposit)
     }
 
     private func post() {
@@ -268,18 +291,26 @@ private struct BatchDepositBuilderView: View {
 
 private struct BatchDepositDetailView: View {
     @Query(sort: \AccountRecord.name) private var accounts: [AccountRecord]
-    @Query private var allAllocations: [DepositAllocationRecord]
+    // Filtered in the store: this screen used to load every allocation of every batch and the entire register
+    // to show one deposit and its two transfer legs.
+    @Query private var allocations: [DepositAllocationRecord]
     @Query private var transactions: [LedgerTransaction]
     @Query private var people: [PersonRecord]
     @Query private var events: [EventRecord]
     let batch: DepositBatchRecord
 
-    private var allocations: [DepositAllocationRecord] {
-        allAllocations.filter { $0.batchID == batch.id }.sorted { $0.receivedAt < $1.receivedAt }
+    init(batch: DepositBatchRecord) {
+        self.batch = batch
+        let batchID: UUID? = batch.id
+        _allocations = Query(filter: #Predicate<DepositAllocationRecord> { $0.batchID == batchID }, sort: \DepositAllocationRecord.receivedAt)
+        let legIDs = [batch.holdingTransactionID, batch.bankTransactionID].compactMap { $0 }
+        _transactions = Query(filter: #Predicate<LedgerTransaction> { legIDs.contains($0.id) })
     }
 
     var body: some View {
-        List {
+        let peopleByID = Dictionary(people.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let eventsByID = Dictionary(events.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return List {
             Section("Bank Deposit") {
                 LabeledContent("Destination", value: accountName(batch.destinationAccountID))
                 LabeledContent("Date", value: batch.depositDate.formatted(date: .long, time: .omitted))
@@ -302,10 +333,10 @@ private struct BatchDepositDetailView: View {
                             .filter { !$0.isEmpty }.joined(separator: " • "))
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        if let personID = allocation.personID, let person = people.first(where: { $0.id == personID }) {
+                        if let person = allocation.personID.flatMap({ peopleByID[$0] }) {
                             Text("Person: \(person.displayName)").font(.caption2).foregroundStyle(.secondary)
                         }
-                        if let eventID = allocation.eventID, let event = events.first(where: { $0.id == eventID }) {
+                        if let event = allocation.eventID.flatMap({ eventsByID[$0] }) {
                             Text("Event: \(event.name)").font(.caption2).foregroundStyle(.secondary)
                         }
                     }

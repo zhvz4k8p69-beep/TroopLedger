@@ -26,20 +26,25 @@ struct FamilyStatementListView: View {
                 }
                 .listRowBackground(Color.clear)
             } else {
+                // Each family row used to scan every person twice and every member-ledger entry once; group both
+                // once per render instead.
+                let membersByFamily = Dictionary(grouping: people.filter { $0.familyID != nil }, by: { $0.familyID! })
+                let balances = FinanceEngine.memberBalances(entries: entries)
                 Section("Families") {
                     ForEach(families) { family in
+                        let members = membersByFamily[family.id] ?? []
                         NavigationLink {
                             FamilyStatementDetailView(family: family)
                         } label: {
                             HStack {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(family.name).font(.headline)
-                                    Text(memberSummary(for: family))
+                                    Text(members.isEmpty ? "No members assigned" : members.map(\.displayName).joined(separator: ", "))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                MoneyText(cents: balance(for: family), colorBySign: true)
+                                MoneyText(cents: members.reduce(0) { $0 + (balances[$1.id] ?? 0) }, colorBySign: true)
                             }
                         }
                         .swipeActions(edge: .leading) {
@@ -95,16 +100,6 @@ struct FamilyStatementListView: View {
         people.filter { $0.familyID == family.id }
     }
 
-    private func memberSummary(for family: FamilyRecord) -> String {
-        let names = members(for: family).map(\.displayName)
-        return names.isEmpty ? "No members assigned" : names.joined(separator: ", ")
-    }
-
-    private func balance(for family: FamilyRecord) -> Int64 {
-        let ids = Set(members(for: family).map(\.id))
-        return entries.filter { $0.personID.map(ids.contains) ?? false }.reduce(0) { $0 + $1.balanceEffectCents }
-    }
-
     private func deleteFamilies(at offsets: IndexSet) {
         guard let index = offsets.first else { return }
         pendingDeletion = families[index]
@@ -143,6 +138,7 @@ struct FamilyEditorView: View {
     @State private var notes: String
     @State private var selectedMemberIDs: Set<UUID>
     @State private var errorMessage: String?
+    @State private var isSaving = false
 
     init(family: FamilyRecord? = nil, initialMemberIDs: Set<UUID>) {
         self.family = family
@@ -194,7 +190,7 @@ struct FamilyEditorView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save", action: save)
-                        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(isSaving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
@@ -215,6 +211,10 @@ struct FamilyEditorView: View {
     }
 
     private func save() {
+        // A second click during the sheet's dismissal re-entered save() and created the family twice.
+        guard !isSaving else { return }
+        isSaving = true
+        defer { if errorMessage != nil { isSaving = false } }
         let record = family ?? FamilyRecord(name: name)
         let isNew = family == nil
         record.name = name.trimmingCharacters(in: .whitespacesAndNewlines)

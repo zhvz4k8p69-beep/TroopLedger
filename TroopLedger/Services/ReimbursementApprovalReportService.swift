@@ -52,8 +52,16 @@ struct ReimbursementApprovalReport: Equatable {
     let generatedAt: Date
     let dualControlEnabled: Bool
     let rows: [ReimbursementApprovalReportRow]
+    /// Stored once: the summary header asks for four per-kind counts on every render, and each call
+    /// re-filtered every row.
+    let exceptionRows: [ReimbursementApprovalReportRow]
 
-    var exceptionRows: [ReimbursementApprovalReportRow] { rows.filter(\.hasExceptions) }
+    init(generatedAt: Date, dualControlEnabled: Bool, rows: [ReimbursementApprovalReportRow]) {
+        self.generatedAt = generatedAt
+        self.dualControlEnabled = dualControlEnabled
+        self.rows = rows
+        exceptionRows = rows.filter(\.hasExceptions)
+    }
 
     func exceptionCount(for kind: ReimbursementApprovalIssueKind) -> Int {
         exceptionRows.filter { row in row.issues.contains { $0.kind == kind } }.count
@@ -76,7 +84,16 @@ enum ReimbursementApprovalReportService {
         // Indexed once: the per-request audit scan used to walk the whole log with a locale-aware substring
         // search for every request, and the view evaluates this report several times per render.
         let auditByRecordID = Dictionary(grouping: auditEntries.filter { $0.recordID != nil }, by: { $0.recordID! })
-        let auditMentions = auditEntries.map { (entry: $0, details: $0.details.lowercased()) }
+        // Entries that mention a request in their details (payment transactions, attachments) are indexed by
+        // every UUID they contain, in one pass over the log. Scanning the full log per request was quadratic:
+        // a few hundred requests against a multi-year log ran millions of substring searches per render.
+        var auditMentions: [UUID: [AuditLogEntry]] = [:]
+        for entry in auditEntries {
+            for id in mentionedUUIDs(in: entry.details) {
+                auditMentions[id, default: []].append(entry)
+            }
+        }
+        let calendar = Calendar.current
         let transactionsByID = Dictionary(transactions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let receiptCounts = Dictionary(grouping: attachments.compactMap { attachment in
             attachment.requestID.map { ($0, attachment) }
@@ -124,7 +141,7 @@ enum ReimbursementApprovalReportService {
 
             if request.status == .approved && request.linkedTransactionID == nil {
                 issues.append(.init(kind: .transaction, message: "Approved request has no linked payment transaction."))
-                if let reviewedAt = request.reviewedAt, let days = Calendar.current.dateComponents([.day], from: reviewedAt, to: generatedAt).day, days > 30 {
+                if let reviewedAt = request.reviewedAt, let days = calendar.dateComponents([.day], from: reviewedAt, to: generatedAt).day, days > 30 {
                     issues.append(.init(kind: .transaction, message: "Approved \(days) days ago and still unpaid."))
                 }
             } else if request.status == .paid && request.linkedTransactionID == nil {
@@ -150,7 +167,6 @@ enum ReimbursementApprovalReportService {
                 if let personID = transaction.personID, personID != request.requesterPersonID {
                     issues.append(.init(kind: .transaction, message: "The linked payment is attributed to a different person than the requester."))
                 }
-                let calendar = Calendar.current
                 if calendar.startOfDay(for: transaction.date) < calendar.startOfDay(for: request.purchaseDate) {
                     issues.append(.init(kind: .transaction, message: "The linked payment is dated before the purchase it reimburses."))
                 }
@@ -212,13 +228,12 @@ enum ReimbursementApprovalReportService {
         requesterName: String,
         receiptCount: Int,
         auditByRecordID: [UUID: [AuditLogEntry]],
-        auditMentions: [(entry: AuditLogEntry, details: String)],
+        auditMentions: [UUID: [AuditLogEntry]],
         issues: [ReimbursementApprovalIssue]
     ) -> ReimbursementApprovalReportRow {
         let requestID = request.id
-        let needle = requestID.uuidString.lowercased()
         let relatedAudit = (auditByRecordID[requestID] ?? [])
-            + auditMentions.filter { $0.entry.recordID != requestID && $0.details.contains(needle) }.map(\.entry)
+            + (auditMentions[requestID] ?? []).filter { $0.recordID != requestID }
         return ReimbursementApprovalReportRow(
             requestID: request.id,
             requesterName: requesterName,
@@ -237,6 +252,20 @@ enum ReimbursementApprovalReportService {
             latestAuditAt: relatedAudit.map(\.timestamp).max(),
             issues: issues
         )
+    }
+
+    // NSRegularExpression is immutable and documented thread-safe.
+    nonisolated(unsafe) private static let uuidPattern = try! NSRegularExpression(pattern: "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
+
+    /// Every distinct UUID written into an audit entry's details, whatever its case.
+    static func mentionedUUIDs(in details: String) -> Set<UUID> {
+        guard details.contains("-") else { return [] }
+        let range = NSRange(details.startIndex..., in: details)
+        return uuidPattern.matches(in: details, range: range).reduce(into: Set<UUID>()) { result, match in
+            if let swiftRange = Range(match.range, in: details), let id = UUID(uuidString: String(details[swiftRange])) {
+                result.insert(id)
+            }
+        }
     }
 
     private static func requesterName(for request: ReimbursementRequest, peopleByID: [UUID: PersonRecord]) -> String {

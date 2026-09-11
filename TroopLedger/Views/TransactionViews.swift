@@ -859,12 +859,16 @@ private struct TransactionEditorView: View {
                         Text("Choose an account").tag(nil as UUID?)
                         ForEach(selectableAccounts) { Text($0.isActive ? $0.name : "\($0.name) (inactive)").tag($0.id as UUID?) }
                     }
-                    .disabled(isAdjustment)
+                    .disabled(isAdjustment || isLinkedMoneyRecord)
                     DatePicker("Date", selection: $date, displayedComponents: .date)
+                    // The banner above says these are fixed; leaving them editable let the treasurer retype the
+                    // amount and only learn on Save that the edit was refused.
                     Picker("Type", selection: $direction) {
                         ForEach(TransactionDirection.allCases) { Text($0.rawValue).tag($0) }
                     }
+                    .disabled(isLinkedMoneyRecord)
                     AmountField(title: "Amount", text: $amount)
+                        .disabled(isLinkedMoneyRecord)
                     TextField("Check / reference number", text: $checkNumber)
                     TextField(direction == .income ? "Received from" : "Payee", text: $payee)
                     Picker("Saved category", selection: categoryDefinitionSelection) {
@@ -1076,19 +1080,26 @@ struct TransactionProtectionIndex {
 private struct LockedTransactionView: View {
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \AccountRecord.name) private var accounts: [AccountRecord]
-    @Query(sort: \LedgerTransaction.date, order: .reverse) private var transactions: [LedgerTransaction]
+    // Only the corrected transaction (if any) is needed; this sheet used to load the entire register for it.
+    @Query private var correctedTransactions: [LedgerTransaction]
     @Query(sort: \ReconciliationRecord.statementDate, order: .reverse) private var reconciliations: [ReconciliationRecord]
     let transaction: LedgerTransaction
     @State private var showingAdjustment = false
+
+    init(transaction: LedgerTransaction) {
+        self.transaction = transaction
+        if let target = transaction.adjustsTransactionID {
+            _correctedTransactions = Query(filter: #Predicate<LedgerTransaction> { $0.id == target })
+        } else {
+            _correctedTransactions = Query(filter: #Predicate<LedgerTransaction> { _ in false })
+        }
+    }
 
     private var lockDate: Date? {
         PeriodLocking.latestLockDate(for: transaction.accountID, reconciliations: reconciliations)
     }
 
-    private var adjustedTransaction: LedgerTransaction? {
-        guard let id = transaction.adjustsTransactionID else { return nil }
-        return transactions.first { $0.id == id }
-    }
+    private var adjustedTransaction: LedgerTransaction? { correctedTransactions.first }
 
     var body: some View {
         NavigationStack {
@@ -1163,6 +1174,7 @@ struct AccountTransferFormView: View {
     @State private var reference = ""
     @State private var memo = ""
     @State private var errorMessage: String?
+    @State private var isSaving = false
 
     /// Undeposited Funds moves only through deposit batches, which preserve receipt allocations.
     private var activeAccounts: [AccountRecord] { accounts.filter { $0.isActive && $0.kind != .undepositedFunds } }
@@ -1197,7 +1209,7 @@ struct AccountTransferFormView: View {
             .navigationTitle("Transfer Between Accounts")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Post Transfer", action: save).disabled(!canSave) }
+                ToolbarItem(placement: .confirmationAction) { Button("Post Transfer", action: save).disabled(!canSave || isSaving) }
             }
             .onAppear {
                 if fromAccountID == nil { fromAccountID = activeAccounts.first(where: { $0.kind == .checking })?.id ?? activeAccounts.first?.id }
@@ -1211,6 +1223,10 @@ struct AccountTransferFormView: View {
     }
 
     private func save() {
+        // Nothing de-duplicates a transfer, so a second click during the sheet's dismissal moved the money twice.
+        guard !isSaving else { return }
+        isSaving = true
+        defer { if errorMessage != nil { isSaving = false } }
         do {
             guard let cents = Money.cents(from: amount) else { throw AccountTransferError.invalidAmount }
             _ = try AccountTransferService.post(

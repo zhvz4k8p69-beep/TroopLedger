@@ -156,8 +156,10 @@ enum ScoutbookImporter {
 
     @MainActor
     static func importDocument(_ document: ScoutbookCSVDocument, kind: ScoutbookCSVKind, into modelContext: ModelContext) throws -> ScoutbookImportResult {
-        let previous = try modelContext.fetch(FetchDescriptor<ScoutbookImportRecord>())
-        guard !previous.contains(where: { $0.sourceFingerprint == document.fingerprint }) else {
+        // A count query; every earlier import record (with its notes) was loaded to compare one string.
+        let fingerprint = document.fingerprint
+        let previous = FetchDescriptor<ScoutbookImportRecord>(predicate: #Predicate { $0.sourceFingerprint == fingerprint })
+        guard try modelContext.fetchCount(previous) == 0 else {
             throw ScoutbookImportError.alreadyImported
         }
         let preview = preview(document: document, kind: kind)
@@ -181,7 +183,9 @@ enum ScoutbookImporter {
             record.insertedCount = result.inserted
             record.updatedCount = result.updated
             record.skippedCount = result.skipped
-            record.notes = (result.issues + result.changes).joined(separator: "\n")
+            // Bounded: a payment log with an unreadable date column produced one issue per row, and a
+            // multi-megabyte notes field makes the record (and its audit entry) unsyncable through CloudKit.
+            record.notes = AuditLogger.truncatedList(result.issues + result.changes, limit: 200)
             modelContext.insert(record)
             AuditLogger.record(
                 .importData,
@@ -194,10 +198,10 @@ enum ScoutbookImporter {
                     ("Inserted", String(record.insertedCount)),
                     ("Updated", String(record.updatedCount)),
                     ("Skipped", String(record.skippedCount)),
-                    ("Issues", result.issues.joined(separator: "\n")),
+                    ("Issues", AuditLogger.truncatedList(result.issues, limit: 100)),
                     // A roster file can flip a leader to a Scout or deactivate a family; the audit entry
                     // must show each such change, not only the count of updated rows.
-                    ("Changes", result.changes.joined(separator: "\n")),
+                    ("Changes", AuditLogger.truncatedList(result.changes, limit: 200)),
                 ]),
                 in: modelContext
             )
@@ -212,7 +216,11 @@ enum ScoutbookImporter {
     @MainActor
     private static func importPeople(_ rows: [ScoutbookCSVRow], kind: ScoutbookCSVKind, into modelContext: ModelContext) throws -> ScoutbookImportResult {
         var people = PersonIndex(try modelContext.fetch(FetchDescriptor<PersonRecord>()))
-        var registrations = try modelContext.fetch(FetchDescriptor<RegistrationRecord>())
+        // Grouped once; the per-row `first(where:)` over the whole registration table was quadratic.
+        var registrationsByPerson = Dictionary(
+            grouping: try modelContext.fetch(FetchDescriptor<RegistrationRecord>()).filter { $0.personID != nil },
+            by: { $0.personID! }
+        )
         var inserted = 0
         var updated = 0
         var skipped = 0
@@ -274,21 +282,23 @@ enum ScoutbookImporter {
             let registrationDate = parsedRegistrationDate ?? person.joinDate ?? Date()
             let explicitProgramYear = row.value(["Program Year", "Registration Year", "Year"])
             let programYear = explicitProgramYear.isEmpty
-                ? String(Calendar.current.component(.year, from: expiration ?? registrationDate))
+                ? registrationProgramYear(for: expiration ?? registrationDate)
                 : explicitProgramYear
             let registration: RegistrationRecord
-            if let existingRegistration = registrations.first(where: {
-                $0.personID == person.id && normalizedProgramYear($0.programYear) == normalizedProgramYear(programYear)
+            if let existingRegistration = registrationsByPerson[person.id]?.first(where: {
+                normalizedProgramYear($0.programYear) == normalizedProgramYear(programYear)
             }) {
                 registration = existingRegistration
             } else {
                 registration = RegistrationRecord(personID: person.id, programYear: programYear, unitRole: unitRole, status: person.isActive ? .current : .expired)
                 modelContext.insert(registration)
-                registrations.append(registration)
+                registrationsByPerson[person.id, default: []].append(registration)
             }
-            registration.unitRole = unitRole
+            // A later export without a Position or Expiration column must not blank the values an earlier
+            // export (or the treasurer) recorded; only a value present in the file replaces one.
+            if !unitRole.isEmpty { registration.unitRole = unitRole }
             registration.status = person.isActive ? .current : .expired
-            registration.expiresOn = expiration
+            if let expiration { registration.expiresOn = expiration }
             // Without a date in the file, "today" was stamped onto the registration on every re-import,
             // overwriting the real registration date each time. Only a real date may replace an existing one.
             if parsedRegistrationDate != nil || person.joinDate != nil || registration.sourceRow == 0 {
@@ -299,6 +309,12 @@ enum ScoutbookImporter {
         }
 
         return ScoutbookImportResult(inserted: inserted, updated: updated, skipped: skipped, issues: issues, changes: changes)
+    }
+
+    /// The program year a registration or expiration date falls in. Scouting program years are Gregorian;
+    /// `Calendar.current` on a device set to the Buddhist or Japanese calendar produced "2569" or "8".
+    static func registrationProgramYear(for date: Date) -> String {
+        String(gregorianCalendar.component(.year, from: date))
     }
 
     private static func personSnapshot(_ person: PersonRecord) -> [(String, String)] {
@@ -317,7 +333,11 @@ enum ScoutbookImporter {
     @MainActor
     private static func importPayments(_ rows: [ScoutbookCSVRow], into modelContext: ModelContext) throws -> ScoutbookImportResult {
         var people = PersonIndex(try modelContext.fetch(FetchDescriptor<PersonRecord>()))
-        var existingIDs = Set(try modelContext.fetch(FetchDescriptor<MemberLedgerEntry>()).filter { $0.sourceSystem == "Scoutbook" }.map(\.externalSourceID))
+        // Only Scoutbook-sourced rows carry an external ID worth comparing; the whole member ledger (dues,
+        // event charges, close-out adjustments) used to be loaded and filtered in memory.
+        let scoutbookSource = "Scoutbook"
+        let scoutbookEntries = FetchDescriptor<MemberLedgerEntry>(predicate: #Predicate { $0.sourceSystem == scoutbookSource })
+        var existingIDs = Set(try modelContext.fetch(scoutbookEntries).map(\.externalSourceID))
         var inserted = 0
         var skipped = 0
         var issues: [String] = []
@@ -475,11 +495,13 @@ enum ScoutbookImporter {
 
         let value = row.value(["Role", "Position", "Unit Role", "Registered Position"]).lowercased()
         if value.contains("parent") || value.contains("guardian") { return .parent }
-        if value.contains("scout") || value.contains("youth") || value.contains("cub") { return .scout }
-        if value.contains("leader") || value.contains("adult") || value.contains("committee") || value.contains("master") || value.contains("advisor") { return .leader }
+        // A recognized troop position decides before the generic words do: "Patrol Leader" contains
+        // "leader" but is a Scout, and "Scoutmaster" contains "scout" but is an adult.
         if let position = TroopPosition.matching(value) {
             return position.category == .youth ? .scout : .leader
         }
+        if value.contains("scout") || value.contains("youth") || value.contains("cub") { return .scout }
+        if value.contains("leader") || value.contains("adult") || value.contains("committee") || value.contains("master") || value.contains("advisor") { return .leader }
         return defaultKind == .members ? .scout : .leader
     }
 
@@ -505,9 +527,8 @@ enum ScoutbookImporter {
         guard !value.isEmpty else { return nil }
         // A `yyyy` pattern happily accepts a two-digit year ("1/15/24" becomes 15 January 0024), so every
         // candidate is checked for a plausible year before the two-digit `yy` patterns get their turn.
-        let calendar = Calendar(identifier: .gregorian)
         for formatter in dateFormatters {
-            if let date = formatter.date(from: value), (1900...2200).contains(calendar.component(.year, from: date)) {
+            if let date = formatter.date(from: value), (1900...2200).contains(gregorianCalendar.component(.year, from: date)) {
                 return date
             }
         }
@@ -521,6 +542,10 @@ enum ScoutbookImporter {
             "M/d/yy h:mm a", "M/d/yy H:mm", "M/d/yy",
             "yyyy-MM-dd'T'HH:mm:ssZZZZZ", "yyyy-MM-dd",
     ]
+
+    /// One Gregorian calendar for year checks and program years; a fresh `Calendar(identifier:)` was built
+    /// on every date parse (up to four per roster row).
+    private static let gregorianCalendar = Calendar(identifier: .gregorian)
 
     nonisolated(unsafe) private static let dateFormatters: [DateFormatter] = dateFormats.map { format in
         let formatter = DateFormatter()
@@ -561,7 +586,9 @@ enum ScoutbookImporter {
         }
 
         mutating func add(_ person: PersonRecord) {
-            let memberID = person.scoutingMemberID
+            // File values are trimmed before lookup; a stored ID with a stray space (workbook imports and
+            // older records are not trimmed) never matched and the row created a duplicate person.
+            let memberID = person.scoutingMemberID.trimmingCharacters(in: .whitespacesAndNewlines)
             if !memberID.isEmpty, byMemberID[memberID] == nil { byMemberID[memberID] = person }
             byName[ScoutbookImporter.normalizedName(firstName: person.firstName, lastName: person.lastName), default: []].append(person)
         }

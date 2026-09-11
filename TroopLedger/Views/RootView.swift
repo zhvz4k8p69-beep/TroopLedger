@@ -31,7 +31,7 @@ struct AppLockGate: ViewModifier {
                 }
             }
             .onAppear {
-                if requiresAuthentication, !lock.hasUnlockedThisLaunch, !lock.isLocked {
+                if Self.shouldLockOnAppear(isEnabled: requiresAuthentication, hasUnlockedThisLaunch: lock.hasUnlockedThisLaunch, isLocked: lock.isLocked) {
                     lock.isLocked = true
                     authenticate()
                 }
@@ -52,6 +52,11 @@ struct AppLockGate: ViewModifier {
                     break
                 }
             }
+    }
+
+    /// A fresh scene locks only when nobody has authenticated (or been acknowledged as present) since launch.
+    static func shouldLockOnAppear(isEnabled: Bool, hasUnlockedThisLaunch: Bool, isLocked: Bool) -> Bool {
+        isEnabled && !hasUnlockedThisLaunch && !isLocked
     }
 
     private var lockScreen: some View {
@@ -106,6 +111,12 @@ final class AppLockState {
     var isLocked = false
     var isAuthenticating = false
     var hasUnlockedThisLaunch = false
+
+    /// Called when the treasurer turns the lock on from Preferences: they are demonstrably at the device, so
+    /// the scenes that open next should not start locked.
+    func acknowledgePresentUser() {
+        hasUnlockedThisLaunch = true
+    }
 }
 
 extension View {

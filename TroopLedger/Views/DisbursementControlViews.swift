@@ -137,6 +137,12 @@ struct TroopProfileSettingsView: View {
 #endif
             }
             .onAppear { load() }
+            // The form is filled from the stored profile once. On a device that opened Preferences before iCloud
+            // delivered the troop's profile, the blanks stayed on screen and Save then overwrote the synced
+            // profile with them. Refresh when a different stored record arrives and nothing has been typed.
+            .onChange(of: storedProfiles.first?.id) { _, _ in
+                if !hasUnsavedChanges { load(force: true) }
+            }
         }
 #if os(macOS)
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -349,6 +355,9 @@ struct DisbursementControlSettingsView: View {
                 var availabilityError: NSError?
                 if LAContext().canEvaluatePolicy(.deviceOwnerAuthentication, error: &availabilityError) {
                     requiresDeviceAuthentication = true
+                    // The person switching the lock on is at the device now; without this the next window to
+                    // open (reopening Preferences on a Mac) locked immediately and demanded Touch ID.
+                    AppLockState.shared.acknowledgePresentUser()
                 } else {
                     errorMessage = availabilityError?.localizedDescription ?? "Set a device passcode, Touch ID, or Face ID before turning on the lock."
                 }
@@ -428,6 +437,12 @@ struct DisbursementControlSettingsView: View {
                 ToolbarItem(placement: .confirmationAction) { Button("Save", action: save) }
             }
             .onAppear(perform: load)
+            // Same as the troop profile: settings that sync in after the first appearance must replace the
+            // defaults shown, or Save writes the defaults back over them.
+            .onChange(of: storedSettings.first?.id) { _, _ in
+                loaded = false
+                load()
+            }
         }
         .frame(minWidth: 480, minHeight: 460)
         .fileExporter(

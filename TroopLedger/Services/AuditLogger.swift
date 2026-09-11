@@ -6,7 +6,10 @@ struct AuditIdentity: Equatable {
     let operatingSystem: String
     let userIdentity: String
 
-    static var current: AuditIdentity {
+    /// Resolved once per process. It is the default argument of every `AuditLogger.record` call, and a
+    /// roster import or calendar sync writes hundreds of entries; each one re-ran the directory lookup behind
+    /// `NSFullUserName` and rebuilt the version string. None of these values change while the app runs.
+    static let current: AuditIdentity = {
         let process = ProcessInfo.processInfo
 #if os(macOS)
         let localUser = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
@@ -18,7 +21,7 @@ struct AuditIdentity: Equatable {
             operatingSystem: "\(process.operatingSystemVersionString) • TroopLedger \(applicationVersion)",
             userIdentity: localUser
         )
-    }
+    }()
 
     /// Which build wrote an entry matters when reconstructing what a bug or an old version did to the books.
     private static let applicationVersion: String = {
@@ -112,7 +115,12 @@ enum AuditLogger {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         let header = ["id", "timestamp", "action", "record_type", "record_id", "summary", "details", "device_name", "operating_system", "user_identity"]
-        let rows = entries.sorted { $0.timestamp < $1.timestamp }.map { entry in
+        // Entries written in the same instant (one action records several) need a tiebreaker, or two exports
+        // of the same log produce different bytes and the recorded SHA-256 of the export no longer matches.
+        let rows = entries.sorted {
+            if $0.timestamp != $1.timestamp { return $0.timestamp < $1.timestamp }
+            return $0.id.uuidString < $1.id.uuidString
+        }.map { entry in
             [entry.id.uuidString.lowercased(), formatter.string(from: entry.timestamp), entry.actionRaw, entry.recordType, entry.recordID?.uuidString.lowercased() ?? "", entry.summary, entry.details, entry.deviceName, entry.operatingSystem, entry.userIdentity]
         }
         return ([header] + rows).map { $0.map(CSVFormatting.field).joined(separator: ",") }.joined(separator: "\r\n") + "\r\n"

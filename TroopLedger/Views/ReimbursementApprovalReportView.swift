@@ -28,14 +28,17 @@ struct ReimbursementApprovalReportView: View {
         )
     }
 
-    private var filteredRows: [ReimbursementApprovalReportRow] {
+    private func filteredRows(in report: ReimbursementApprovalReport) -> [ReimbursementApprovalReportRow] {
         guard let issueFilter else { return report.exceptionRows }
         return report.exceptionRows.filter { row in row.issues.contains { $0.kind == issueFilter } }
     }
 
     var body: some View {
-        // Built once per render; the summary section alone read the computed report eight times.
+        // Built once per render; the summary section alone read the computed report eight times. The
+        // exception filter used to rebuild the whole report a second time, and each row rescanned every request.
         let report = self.report
+        let filteredRows = filteredRows(in: report)
+        let requestsByID = Dictionary(requests.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return List {
             Section {
                 TroopReportHeader(
@@ -73,7 +76,7 @@ struct ReimbursementApprovalReportView: View {
                     )
                 } else {
                     ForEach(filteredRows) { row in
-                        if let request = requests.first(where: { $0.id == row.requestID }) {
+                        if let request = requestsByID[row.requestID] {
                             NavigationLink {
                                 ReimbursementDetailView(request: request)
                             } label: {

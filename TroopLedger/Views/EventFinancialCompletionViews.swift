@@ -244,6 +244,14 @@ struct EventCloseoutView: View {
         Calendar.current.startOfDay(for: event.endDate) <= Calendar.current.startOfDay(for: Date())
     }
 
+    /// The service refuses a close date before the event ended or after today; the picker used to offer any
+    /// past date, so a treasurer could pick one, confirm the close-out, and only then be told it was invalid.
+    static func closeDateRange(eventEnd: Date, now: Date = Date(), calendar: Calendar = .current) -> ClosedRange<Date> {
+        let today = calendar.startOfDay(for: now)
+        let earliest = min(calendar.startOfDay(for: eventEnd), today)
+        return earliest...max(now, earliest)
+    }
+
     var body: some View {
         let preview = self.preview
         return List {
@@ -290,7 +298,7 @@ struct EventCloseoutView: View {
                     }
                 }
                 Section("Post Close-out") {
-                    DatePicker("Close date", selection: $closeDate, in: ...Date(), displayedComponents: [.date])
+                    DatePicker("Close date", selection: $closeDate, in: Self.closeDateRange(eventEnd: event.endDate), displayedComponents: [.date])
                     Toggle("Post final-cost member adjustments", isOn: $postAdjustments)
                     Text("When enabled, each rostered member receives one balance increase or decrease for the difference between their recorded fee and actual per-participant cost. Guests remain in the close-out without a member-ledger entry.")
                         .font(.footnote).foregroundStyle(.secondary)

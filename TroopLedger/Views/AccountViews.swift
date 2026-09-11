@@ -24,6 +24,8 @@ struct AccountListView: View {
                 }
             } else {
                 List {
+                    // One pass over the register instead of a full scan per account row per render.
+                    let balances = FinanceEngine.bookBalances(accounts: accounts, transactions: transactions)
                     ForEach(accounts) { account in
                         Button {
                             accountToEdit = account
@@ -50,7 +52,7 @@ struct AccountListView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                MoneyText(cents: FinanceEngine.bookBalance(account: account, transactions: transactions))
+                                MoneyText(cents: balances[account.id] ?? account.openingBalanceCents)
                             }
                             .contentShape(Rectangle())
                         }
@@ -153,6 +155,7 @@ struct AccountFormView: View {
     @State private var isActive: Bool
     @State private var notes: String
     @State private var errorMessage: String?
+    @State private var isSaving = false
 
     init(account: AccountRecord? = nil) {
         self.account = account
@@ -186,6 +189,11 @@ struct AccountFormView: View {
                     }
                     AmountField(title: "Opening balance", text: $openingBalance, allowsNegative: true)
                         .disabled(openingBalanceIsLocked)
+                    if let issue = Money.cents(from: openingBalance).flatMap({ Self.openingBalanceIssue(kind: kind, cents: $0) }) {
+                        Label(issue, systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
                     if openingBalanceIsLocked {
                         Text("The opening balance is fixed because this account has completed reconciliations. Record a future-dated adjustment instead of rewriting locked history.")
                             .font(.footnote)
@@ -199,7 +207,7 @@ struct AccountFormView: View {
             .navigationTitle(account == nil ? "New Account" : "Edit Account")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(!canSave) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save", action: save).disabled(!canSave || isSaving) }
             }
         }
         .frame(minWidth: 420, minHeight: 420)
@@ -208,7 +216,17 @@ struct AccountFormView: View {
         )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
     }
 
-    private var canSave: Bool { !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && Money.cents(from: openingBalance) != nil }
+    private var canSave: Bool {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let cents = Money.cents(from: openingBalance) else { return false }
+        return openingBalanceIsLocked || Self.openingBalanceIssue(kind: kind, cents: cents) == nil
+    }
+
+    /// A cash box or Undeposited Funds cannot hold less than nothing. Every later receipt and payout is checked
+    /// against that rule, but the form let a holding account start out overdrawn through its opening balance.
+    static func openingBalanceIssue(kind: AccountKind, cents: Int64) -> String? {
+        guard cents < 0, kind == .cash || kind == .undepositedFunds else { return nil }
+        return "\(kind.rawValue) cannot open with a negative balance. Cash boxes and Undeposited Funds only hold money that was received."
+    }
     private var openingBalanceIsLocked: Bool {
         guard let account else { return false }
         return !ReconciliationPolicy.canEditOpeningBalance(account, reconciliations: reconciliations)
@@ -233,7 +251,10 @@ struct AccountFormView: View {
     }
 
     private func save() {
-        guard let cents = Money.cents(from: openingBalance) else { return }
+        // A second click during the sheet's dismissal re-entered save() and created the account twice.
+        guard !isSaving, canSave, let cents = Money.cents(from: openingBalance) else { return }
+        isSaving = true
+        defer { if errorMessage != nil { isSaving = false } }
         do {
             try UndepositedFundsService.validateUnique(kind: kind, editingAccountID: account?.id, accounts: accounts)
             let record = account ?? AccountRecord(name: name)

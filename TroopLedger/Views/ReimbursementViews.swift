@@ -17,7 +17,7 @@ struct ReimbursementListView: View {
     @State private var showingNewRequest = false
     @State private var searchText = ""
 
-    private var filteredRequests: [ReimbursementRequest] {
+    private func filteredRequests(names: [UUID: String]) -> [ReimbursementRequest] {
         let byStatus: [ReimbursementRequest] = switch filter {
         case .open: requests.filter { $0.status == .submitted || $0.status == .approved }
         case .all: requests
@@ -27,7 +27,6 @@ struct ReimbursementListView: View {
         case .declined: requests.filter { $0.status == .declined }
         }
         guard !searchText.isEmpty else { return byStatus }
-        let names = Dictionary(people.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
         let searchesAmount = searchText.contains { $0.isNumber }
         return byStatus.filter {
             $0.purpose.localizedCaseInsensitiveContains(searchText)
@@ -39,7 +38,10 @@ struct ReimbursementListView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        // The filter ran twice per render and every row searched the people list for its requester's name.
+        let names = Dictionary(people.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
+        let filteredRequests = filteredRequests(names: names)
+        return VStack(spacing: 0) {
             Picker("Request filter", selection: $filter) {
                 ForEach(ReimbursementFilter.allCases) { option in Text(option.rawValue).tag(option) }
             }
@@ -60,7 +62,7 @@ struct ReimbursementListView: View {
                     NavigationLink {
                         ReimbursementDetailView(request: request)
                     } label: {
-                        ReimbursementRow(request: request, requesterName: requesterName(for: request))
+                        ReimbursementRow(request: request, requesterName: request.requesterPersonID.flatMap { names[$0] } ?? "Unknown requester")
                     }
                 }
                 .listStyle(.inset)
@@ -72,10 +74,6 @@ struct ReimbursementListView: View {
             Button("New Reimbursement", systemImage: "plus") { showingNewRequest = true }
         }
         .sheet(isPresented: $showingNewRequest) { ReimbursementEditorView() }
-    }
-
-    private func requesterName(for request: ReimbursementRequest) -> String {
-        people.first { $0.id == request.requesterPersonID }?.displayName ?? "Unknown requester"
     }
 }
 
@@ -277,10 +275,13 @@ struct ReimbursementDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \PersonRecord.lastName) private var people: [PersonRecord]
     @Query(sort: \EventRecord.startDate, order: .reverse) private var events: [EventRecord]
-    @Query(sort: \LedgerTransaction.date, order: .reverse) private var transactions: [LedgerTransaction]
-    @Query(sort: \ReimbursementAttachment.createdAt) private var allAttachments: [ReimbursementAttachment]
+    // Filtered in the store. This screen used to load every receipt attachment in the database (each carrying
+    // its image or PDF bytes) and the entire register to show one request and its one payment.
+    @Query private var linkedTransactions: [LedgerTransaction]
+    @Query private var attachments: [ReimbursementAttachment]
     @Query(sort: \DisbursementControlSettings.modifiedAt, order: .reverse) private var controlSettings: [DisbursementControlSettings]
     let request: ReimbursementRequest
+    @State private var pendingAttachmentRemoval: ReimbursementAttachment?
     @State private var showingEdit = false
     @State private var showingReview = false
     @State private var showingPayment = false
@@ -294,12 +295,19 @@ struct ReimbursementDetailView: View {
     @State private var showingScanner = false
 #endif
 
-    private var canReopen: Bool {
-        request.status == .declined || (request.status == .approved && request.linkedTransactionID == nil)
+    init(request: ReimbursementRequest) {
+        self.request = request
+        let requestID: UUID? = request.id
+        _attachments = Query(filter: #Predicate<ReimbursementAttachment> { $0.requestID == requestID }, sort: \ReimbursementAttachment.createdAt)
+        if let linkedID = request.linkedTransactionID {
+            _linkedTransactions = Query(filter: #Predicate<LedgerTransaction> { $0.id == linkedID })
+        } else {
+            _linkedTransactions = Query(filter: #Predicate<LedgerTransaction> { _ in false })
+        }
     }
 
-    private var attachments: [ReimbursementAttachment] {
-        allAttachments.filter { $0.requestID == request.id }
+    private var canReopen: Bool {
+        request.status == .declined || (request.status == .approved && request.linkedTransactionID == nil)
     }
 
     private var requesterName: String {
@@ -311,7 +319,13 @@ struct ReimbursementDetailView: View {
     }
 
     private var linkedTransaction: LedgerTransaction? {
-        request.linkedTransactionID.flatMap { id in transactions.first { $0.id == id } }
+        if let transaction = linkedTransactions.first { return transaction }
+        // The query's predicate is fixed when this screen is created; a payment recorded from the sheet on this
+        // same screen links a transaction after that, so fetch the one record directly until the view is rebuilt.
+        guard let linkedID = request.linkedTransactionID else { return nil }
+        var descriptor = FetchDescriptor<LedgerTransaction>(predicate: #Predicate { $0.id == linkedID })
+        descriptor.fetchLimit = 1
+        return try? modelContext.fetch(descriptor).first
     }
 
     private var controlPolicy: DisbursementControlPolicy {
@@ -353,7 +367,8 @@ struct ReimbursementDetailView: View {
                         .buttonStyle(.plain)
                         .swipeActions {
                             if request.status == .submitted {
-                                Button("Remove", role: .destructive) { remove(attachment) }
+                                // Receipts are the evidence behind a payout; one swipe used to delete one outright.
+                                Button("Remove", role: .destructive) { pendingAttachmentRemoval = attachment }
                             }
                         }
                     }
@@ -462,6 +477,17 @@ struct ReimbursementDetailView: View {
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
         )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
+        .confirmationDialog(
+            "Remove this receipt?",
+            isPresented: Binding(get: { pendingAttachmentRemoval != nil }, set: { if !$0 { pendingAttachmentRemoval = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingAttachmentRemoval
+        ) { attachment in
+            Button("Remove \(attachment.filename)", role: .destructive) { remove(attachment) }
+            Button("Cancel", role: .cancel) { pendingAttachmentRemoval = nil }
+        } message: { attachment in
+            Text("\(attachment.filename) will be removed from this request. The audit log keeps its fingerprint, but the file itself is not kept.")
+        }
         .alert("Reopen this request for review?", isPresented: $showingReopen) {
             TextField("Reason for reopening", text: $reopenReason)
             Button("Reopen", role: .destructive) { reopen() }
@@ -502,6 +528,7 @@ struct ReimbursementDetailView: View {
     }
 
     private func remove(_ attachment: ReimbursementAttachment) {
+        pendingAttachmentRemoval = nil
         do { try ReimbursementService.removeAttachment(attachment, from: request, in: modelContext) }
         catch { errorMessage = error.localizedDescription }
     }
@@ -530,7 +557,8 @@ private struct ReimbursementReviewView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \PersonRecord.lastName) private var people: [PersonRecord]
     @Query(sort: \DisbursementControlSettings.modifiedAt, order: .reverse) private var controlSettings: [DisbursementControlSettings]
-    @Query private var allAttachments: [ReimbursementAttachment]
+    // Only this request's receipts; the review sheet used to load every attachment in the database to ask "is there one?".
+    @Query private var attachments: [ReimbursementAttachment]
     let request: ReimbursementRequest
     @State private var reviewerName = AuditIdentity.current.userIdentity
     @State private var approverPersonID: UUID?
@@ -538,10 +566,16 @@ private struct ReimbursementReviewView: View {
     @State private var notes = ""
     @State private var errorMessage: String?
 
+    init(request: ReimbursementRequest) {
+        self.request = request
+        let requestID: UUID? = request.id
+        _attachments = Query(filter: #Predicate<ReimbursementAttachment> { $0.requestID == requestID })
+    }
+
     /// Active adults other than the requester; approving one's own request is refused by the service as well.
     private var adults: [PersonRecord] { people.filter { $0.role != .scout && $0.isActive && $0.id != request.requesterPersonID } }
     private var controlPolicy: DisbursementControlPolicy { DisbursementControlPolicy(settings: controlSettings.first) }
-    private var hasReceipt: Bool { allAttachments.contains { $0.requestID == request.id } }
+    private var hasReceipt: Bool { !attachments.isEmpty }
 
     var body: some View {
         NavigationStack {

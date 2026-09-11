@@ -364,6 +364,11 @@ enum ReimbursementService {
                 ("Reviewer", reviewer),
                 ("Amount", Money.currency(cents: request.amountCents)),
                 ("Review notes", reason),
+                // The approver recorded with the decision can later be replaced from the controls screen;
+                // the entry for the decision itself must name who approved it at the time.
+                ("Approver", approver?.normalized.name),
+                ("Approver household", approver?.normalized.household),
+                ("Approver person ID", approver?.personID?.uuidString),
             ]),
             at: date,
             in: modelContext
@@ -434,18 +439,23 @@ enum ReimbursementService {
         guard request.status == .approved else { throw ReimbursementError.requestNotApproved }
         guard request.linkedTransactionID == nil else { throw ReimbursementError.transactionAlreadyLinked }
         guard calendar.startOfDay(for: paymentDate) <= calendar.startOfDay(for: now) else { throw ReimbursementError.paymentDateInFuture }
-        guard let accountID,
-              let account = try modelContext.fetch(FetchDescriptor<AccountRecord>()).first(where: { $0.id == accountID && $0.isActive }) else {
-            throw ReimbursementError.accountRequired
-        }
+        guard let accountID else { throw ReimbursementError.accountRequired }
+        var oneAccount = FetchDescriptor<AccountRecord>(predicate: #Predicate { $0.id == accountID && $0.isActive })
+        oneAccount.fetchLimit = 1
+        guard let account = try modelContext.fetch(oneAccount).first else { throw ReimbursementError.accountRequired }
         // A cash box cannot pay out more than it holds; manual expenses and transfers already refuse this.
-        try HoldingAccountPolicy.validate(
-            account: account,
-            transactions: try modelContext.fetch(FetchDescriptor<LedgerTransaction>()),
-            editing: nil,
-            direction: .expense,
-            amountCents: request.amountCents
-        )
+        // Only holding accounts need the check, and only their own rows: the whole register used to be
+        // faulted in for every check written from the bank account.
+        if account.kind == .cash || account.kind == .undepositedFunds {
+            let holdingID: UUID? = account.id
+            try HoldingAccountPolicy.validate(
+                account: account,
+                transactions: try modelContext.fetch(FetchDescriptor<LedgerTransaction>(predicate: #Predicate { $0.accountID == holdingID })),
+                editing: nil,
+                direction: .expense,
+                amountCents: request.amountCents
+            )
+        }
         switch PeriodLocking.validatePosting(
             accountID: accountID,
             date: paymentDate,
@@ -509,8 +519,11 @@ enum ReimbursementService {
         if let personID = transaction.personID, personID != request.requesterPersonID {
             throw ReimbursementError.transactionBelongsToAnotherPerson
         }
-        let requests = try modelContext.fetch(FetchDescriptor<ReimbursementRequest>())
-        guard !requests.contains(where: { $0.id != request.id && $0.linkedTransactionID == transaction.id }) else {
+        // A predicate instead of loading every request just to compare one identifier.
+        let linkedID: UUID? = transaction.id
+        let requestID = request.id
+        let otherLinks = FetchDescriptor<ReimbursementRequest>(predicate: #Predicate { $0.linkedTransactionID == linkedID && $0.id != requestID })
+        guard try modelContext.fetchCount(otherLinks) == 0 else {
             throw ReimbursementError.transactionAlreadyLinked
         }
         try finishPayment(

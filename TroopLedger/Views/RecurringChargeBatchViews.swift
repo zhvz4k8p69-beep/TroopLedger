@@ -100,7 +100,15 @@ private struct RecurringChargeBatchBuilderView: View {
     }
 
     private var builder: some View {
-        Form {
+        // Assessed dues were looked up (a scan of every registration) for every person row on every render,
+        // and the per-person amount re-parsed per row; resolve both once.
+        let assessedByPerson: [UUID: Int64] = kind == .registration
+            ? Dictionary(uniqueKeysWithValues: visiblePeople.map { person in
+                (person.id, RecurringChargeBatchService.assessedDues(for: person.id, programYear: programYear, registrations: registrations) ?? 0)
+            })
+            : [:]
+        let fixedAmountLabel = Money.cents(from: amount).map { Money.currency(cents: $0) } ?? "Invalid amount"
+        return Form {
             Section("Batch") {
                 Picker("Charge type", selection: $kind) {
                     ForEach(RecurringChargeBatchKind.allCases) { Text($0.rawValue).tag($0) }
@@ -148,7 +156,7 @@ private struct RecurringChargeBatchBuilderView: View {
                     Text("No people are available.").foregroundStyle(.secondary)
                 } else {
                     ForEach(visiblePeople) { person in
-                        personButton(person)
+                        personButton(person, assessed: assessedByPerson[person.id] ?? 0, fixedAmountLabel: fixedAmountLabel)
                     }
                 }
             }
@@ -192,13 +200,8 @@ private struct RecurringChargeBatchBuilderView: View {
         kind == .registration ? ("Registration Charges", "Registration") : ("Monthly Dues", "Dues")
     }
 
-    private func personButton(_ person: PersonRecord) -> some View {
-        let assessed = RecurringChargeBatchService.assessedDues(
-            for: person.id,
-            programYear: programYear,
-            registrations: registrations
-        )
-        let eligible = kind == .dues || (assessed ?? 0) > 0
+    private func personButton(_ person: PersonRecord, assessed: Int64, fixedAmountLabel: String) -> some View {
+        let eligible = kind == .dues || assessed > 0
         return Button {
             if selectedPersonIDs.contains(person.id) { selectedPersonIDs.remove(person.id) }
             else { selectedPersonIDs.insert(person.id) }
@@ -214,9 +217,9 @@ private struct RecurringChargeBatchBuilderView: View {
                 }
                 Spacer()
                 if kind == .dues {
-                    Text(Money.cents(from: amount).map { Money.currency(cents: $0) } ?? "Invalid amount")
+                    Text(fixedAmountLabel)
                         .foregroundStyle(.secondary)
-                } else if let assessed, assessed > 0 {
+                } else if assessed > 0 {
                     MoneyText(cents: assessed)
                 } else {
                     Text("No assessed dues").font(.caption).foregroundStyle(.secondary)

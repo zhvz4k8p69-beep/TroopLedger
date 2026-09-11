@@ -1,8 +1,26 @@
 import CoreGraphics
 import CoreText
 import Foundation
+import os
 import SwiftUI
 import UniformTypeIdentifiers
+
+/// Fonts shared by every PDF renderer. `CTFontCreateWithName` performs a font-descriptor lookup each time,
+/// and the statement, treasurer-report, and roster renderers called it for every cell of every row; a
+/// 60-row roster created several hundred fonts per print. CTFont objects are immutable and thread-safe.
+enum PDFFontCache {
+    private static let fonts = OSAllocatedUnfairLock<[String: CTFont]>(uncheckedState: [:])
+
+    static func font(size: CGFloat, bold: Bool) -> CTFont {
+        let key = "\(bold ? "b" : "r")|\(size)"
+        return fonts.withLockUnchecked { cache in
+            if let cached = cache[key] { return cached }
+            let font = CTFontCreateWithName((bold ? "Helvetica-Bold" : "Helvetica") as CFString, size, nil)
+            cache[key] = font
+            return font
+        }
+    }
+}
 
 struct FamilyStatementSnapshot {
     struct ActivityRow: Identifiable {
@@ -383,7 +401,7 @@ enum FamilyStatementPDFRenderer {
             .replacingOccurrences(of: "—", with: "-")
             .replacingOccurrences(of: "‑", with: "-")
             .replacingOccurrences(of: "•", with: "-")
-        let font = CTFontCreateWithName((bold ? "Helvetica-Bold" : "Helvetica") as CFString, size, nil)
+        let font = PDFFontCache.font(size: size, bold: bold)
         let attributes: [NSAttributedString.Key: Any] = [
             NSAttributedString.Key(kCTFontAttributeName as String): font,
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): color,

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 struct CategoryTotal: Identifiable, Equatable {
     var id: String { category }
@@ -176,12 +177,27 @@ struct ReportingPeriod: Equatable {
 
     func dateRangeLabel(calendar: Calendar = localCalendar) -> String {
         let inclusiveEnd = calendar.date(byAdding: .day, value: -1, to: endDateExclusive) ?? endDateExclusive
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
-        formatter.dateStyle = .long
-        formatter.timeStyle = .none
+        let formatter = Self.rangeFormatter(for: calendar)
         return "\(formatter.string(from: startDate)) – \(formatter.string(from: inclusiveEnd))"
+    }
+
+    /// Cached per calendar and zone: the Reports, Budget, and treasurer-report screens call `dateRangeLabel`
+    /// from their view bodies, and a fresh DateFormatter (ICU pattern generation plus locale data) was built
+    /// on every render. DateFormatter is safe to share for formatting; the lock guards the dictionary.
+    private static let rangeFormatters = OSAllocatedUnfairLock<[String: DateFormatter]>(initialState: [:])
+
+    private static func rangeFormatter(for calendar: Calendar) -> DateFormatter {
+        let key = "\(calendar.identifier)|\(calendar.timeZone.identifier)|\(calendar.locale?.identifier ?? "")"
+        return rangeFormatters.withLock { cache in
+            if let cached = cache[key] { return cached }
+            let formatter = DateFormatter()
+            formatter.calendar = calendar
+            formatter.timeZone = calendar.timeZone
+            formatter.dateStyle = .long
+            formatter.timeStyle = .none
+            cache[key] = formatter
+            return formatter
+        }
     }
 }
 
@@ -270,16 +286,21 @@ enum FinanceEngine {
     }
 
     private static func totals(for transactions: [LedgerTransaction]) -> [CategoryTotal] {
-        // Group on the same folded key the budget variance report uses, so "Dues", " Dues" and "dues" are one
-        // line here as well instead of three rows sitting above a single budget line.
+        categoryTotals(for: transactions)
+            .sorted {
+                if $0.amountCents == $1.amountCents { return $0.category.localizedCaseInsensitiveCompare($1.category) == .orderedAscending }
+                return $0.amountCents > $1.amountCents
+            }
+    }
+
+    /// One total per category, grouped on the same folded key the budget variance report uses, so "Dues",
+    /// " Dues" and "dues" are one line instead of three. Shared by the Reports screen and the treasurer
+    /// report so both documents show the same category lines; callers choose the sort order.
+    static func categoryTotals(for transactions: [LedgerTransaction]) -> [CategoryTotal] {
         Dictionary(grouping: transactions, by: { CategoryCatalog.key(name: $0.category, direction: $0.direction) })
             .map { _, group in
                 let name = group[0].category.trimmingCharacters(in: .whitespacesAndNewlines)
                 return CategoryTotal(category: name.isEmpty ? "Uncategorized" : name, amountCents: group.reduce(0) { $0 + $1.amountCents })
-            }
-            .sorted {
-                if $0.amountCents == $1.amountCents { return $0.category.localizedCaseInsensitiveCompare($1.category) == .orderedAscending }
-                return $0.amountCents > $1.amountCents
             }
     }
 }

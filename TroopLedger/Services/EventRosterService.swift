@@ -49,7 +49,11 @@ struct EventRosterSnapshot {
             let leftGroup = Self.groupOrder(lhs.group)
             let rightGroup = Self.groupOrder(rhs.group)
             if leftGroup != rightGroup { return leftGroup < rightGroup }
-            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            // Two "Unnamed guest" rows (or two Scouts with the same name) must keep one order between renders;
+            // the roster screen maps these rows back to participants, so an unstable sort made the list jump.
+            let byName = lhs.name.localizedStandardCompare(rhs.name)
+            if byName != .orderedSame { return byName == .orderedAscending }
+            return lhs.id.uuidString < rhs.id.uuidString
         }
     }
 
@@ -195,7 +199,7 @@ enum EventRosterPDFRenderer {
             .replacingOccurrences(of: "—", with: "-")
             .replacingOccurrences(of: "‑", with: "-")
             .replacingOccurrences(of: "•", with: "-")
-        let font = CTFontCreateWithName((bold ? "Helvetica-Bold" : "Helvetica") as CFString, size, nil)
+        let font = PDFFontCache.font(size: size, bold: bold)
         let attributes: [NSAttributedString.Key: Any] = [
             NSAttributedString.Key(kCTFontAttributeName as String): font,
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): color,

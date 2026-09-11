@@ -3,6 +3,124 @@ import Security
 import SwiftUI
 import SwiftData
 
+/// Every figure the dashboard shows, computed once per render. The computed properties this replaces were
+/// each read up to eight times per render (the attention panel, the close checklist, the milestone check and
+/// the balance panel all asked the same questions), and most of them walked the entire register to answer.
+struct DashboardMetrics {
+    static let staleUndepositedDays = 14
+
+    let primaryAccount: AccountRecord?
+    let cashPosition: CashPosition
+    let outstandingMemberBalancesCents: Int64
+    let activeMemberCount: Int
+    let unclearedBankTransactionCount: Int
+    let oldestUnclearedDate: Date?
+    let oldestUndepositedAgeDays: Int?
+    let missingReceiptCount: Int
+    let currentBudgetRemainingCents: Int64?
+    let latestReconciliation: ReconciliationRecord?
+    let reconciliationIsCurrent: Bool
+    let upcomingEvents: [EventRecord]
+
+    var undepositedIsStale: Bool { (oldestUndepositedAgeDays ?? 0) >= Self.staleUndepositedDays }
+
+    var closeTasksComplete: Int {
+        [
+            cashPosition.undepositedFundsCents == 0,
+            missingReceiptCount == 0,
+            unclearedBankTransactionCount == 0,
+            reconciliationIsCurrent,
+        ].filter { $0 }.count
+    }
+
+    var attentionCount: Int {
+        [unclearedBankTransactionCount > 0, undepositedIsStale, outstandingMemberBalancesCents > 0, missingReceiptCount > 0, !reconciliationIsCurrent]
+            .filter { $0 }.count
+    }
+
+    init(
+        accounts: [AccountRecord],
+        transactions: [LedgerTransaction],
+        people: [PersonRecord],
+        memberEntries: [MemberLedgerEntry],
+        events: [EventRecord],
+        reconciliations: [ReconciliationRecord],
+        reimbursements: [ReimbursementRequest],
+        attachments: [ReimbursementAttachment],
+        depositAllocations: [DepositAllocationRecord],
+        budgets: [OperatingBudgetRecord],
+        budgetLines: [BudgetLineRecord],
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) {
+        let activeAccounts = accounts.filter(\.isActive)
+        primaryAccount = activeAccounts.first(where: { $0.kind == .checking }) ?? activeAccounts.first
+        cashPosition = FinanceEngine.cashPosition(accounts: accounts, transactions: transactions)
+
+        let balances = FinanceEngine.memberBalances(entries: memberEntries)
+        outstandingMemberBalancesCents = people.reduce(0) { $0 + max(0, balances[$1.id] ?? 0) }
+        activeMemberCount = people.filter(\.isActive).count
+
+        // Only bank-type accounts clear against a statement. Cash on Hand and Undeposited Funds entries
+        // (including every deposit batch's holding leg) never "clear", so counting them made the monthly
+        // close impossible to finish.
+        let bankAccountIDs = Set(accounts.filter { $0.kind != .cash && $0.kind != .undepositedFunds }.map(\.id))
+        let holdingIDs = Set(accounts.filter { $0.kind == .undepositedFunds }.map(\.id))
+        let allocated = Set(depositAllocations.compactMap(\.sourceTransactionID))
+        let period = ReportingPeriod.containing(now)
+        let today = calendar.startOfDay(for: now)
+
+        var unclearedCount = 0
+        var oldestUncleared: Date?
+        var oldestWaiting: Date?
+        var spentThisPeriod: Int64 = 0
+        // One pass over the register for the three ledger-derived figures.
+        for transaction in transactions {
+            guard let accountID = transaction.accountID else { continue }
+            if !transaction.isCleared, bankAccountIDs.contains(accountID) {
+                unclearedCount += 1
+                if oldestUncleared.map({ transaction.date < $0 }) ?? true { oldestUncleared = transaction.date }
+            }
+            if holdingIDs.contains(accountID), transaction.direction == .income, !transaction.isTransfer, !allocated.contains(transaction.id),
+               oldestWaiting.map({ transaction.date < $0 }) ?? true {
+                oldestWaiting = transaction.date
+            }
+            if transaction.direction == .expense, !transaction.isTransfer, period.contains(transaction.date) {
+                spentThisPeriod += transaction.amountCents
+            }
+        }
+        unclearedBankTransactionCount = unclearedCount
+        oldestUnclearedDate = oldestUncleared
+        oldestUndepositedAgeDays = oldestWaiting.flatMap {
+            calendar.dateComponents([.day], from: calendar.startOfDay(for: $0), to: today).day
+        }
+
+        let attachedRequestIDs = Set(attachments.compactMap(\.requestID))
+        missingReceiptCount = reimbursements.filter { $0.status == .submitted && !attachedRequestIDs.contains($0.id) }.count
+
+        if let budget = budgets.first(where: { $0.reportingYearStart == period.startingYear && $0.status == .approved }) {
+            let budgetedExpenses = budgetLines
+                .filter { $0.budgetID == budget.id && $0.direction == .expense }
+                .reduce(0) { $0 + $1.amountCents }
+            currentBudgetRemainingCents = budgetedExpenses - spentThisPeriod
+        } else {
+            currentBudgetRemainingCents = nil
+        }
+
+        let primaryID = primaryAccount?.id
+        latestReconciliation = primaryID.flatMap { id in reconciliations.first { $0.accountID == id } }
+        if let statementDate = latestReconciliation?.statementDate,
+           let previousMonth = calendar.date(byAdding: .month, value: -1, to: now),
+           let expected = calendar.dateInterval(of: .month, for: previousMonth)?.start {
+            reconciliationIsCurrent = statementDate >= expected
+        } else {
+            reconciliationIsCurrent = false
+        }
+
+        upcomingEvents = Array(events.filter { $0.endDate >= today && $0.status != .cancelled }.prefix(4))
+    }
+}
+
 struct DashboardView: View {
     @Query(sort: \TroopProfileRecord.modifiedAt, order: .reverse) private var troopProfiles: [TroopProfileRecord]
     @Query(sort: \AccountRecord.name) private var accounts: [AccountRecord]
@@ -27,76 +145,22 @@ struct DashboardView: View {
         self.onOpenSection = onOpenSection
     }
 
-    private var activeAccounts: [AccountRecord] { accounts.filter(\.isActive) }
-    private var primaryAccount: AccountRecord? {
-        activeAccounts.first(where: { $0.kind == .checking }) ?? activeAccounts.first
+    private var metrics: DashboardMetrics {
+        DashboardMetrics(
+            accounts: accounts,
+            transactions: transactions,
+            people: people,
+            memberEntries: memberEntries,
+            events: events,
+            reconciliations: reconciliations,
+            reimbursements: reimbursements,
+            attachments: reimbursementAttachments,
+            depositAllocations: depositAllocations,
+            budgets: budgets,
+            budgetLines: budgetLines
+        )
     }
-    private var cashPosition: CashPosition { FinanceEngine.cashPosition(accounts: accounts, transactions: transactions) }
-    private var outstandingMemberBalances: Int64 {
-        // One pass over the ledger instead of one full scan per person.
-        let balances = FinanceEngine.memberBalances(entries: memberEntries)
-        return people.reduce(0) { $0 + max(0, balances[$1.id] ?? 0) }
-    }
-    /// Only bank-type accounts clear against a statement. Cash on Hand and Undeposited Funds entries
-    /// (including every deposit batch's holding leg) never "clear", so counting them made the monthly
-    /// close impossible to finish.
-    private var bankAccountIDs: Set<UUID> {
-        Set(accounts.filter { $0.kind != .cash && $0.kind != .undepositedFunds }.map(\.id))
-    }
-    private var unclearedTransactions: [LedgerTransaction] {
-        transactions.filter { !$0.isCleared && $0.accountID.map(bankAccountIDs.contains) == true }
-    }
-    private var upcomingEvents: [EventRecord] {
-        Array(events.filter { $0.endDate >= Calendar.current.startOfDay(for: Date()) && $0.status != .cancelled }.prefix(4))
-    }
-    private var latestReconciliation: ReconciliationRecord? {
-        guard let accountID = primaryAccount?.id else { return nil }
-        return reconciliations.first { $0.accountID == accountID }
-    }
-    private var submittedReimbursements: [ReimbursementRequest] {
-        reimbursements.filter { $0.status == .submitted }
-    }
-    /// Cash and checks that have sat in Undeposited Funds for two weeks or more.
-    private var oldestUndepositedAgeDays: Int? {
-        let holdingIDs = Set(accounts.filter { $0.kind == .undepositedFunds }.map(\.id))
-        let allocated = Set(depositAllocations.compactMap(\.sourceTransactionID))
-        let waiting = transactions.filter { $0.accountID.map(holdingIDs.contains) == true && $0.direction == .income && !$0.isTransfer && !allocated.contains($0.id) }
-        guard let oldest = waiting.map(\.date).min() else { return nil }
-        return Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: oldest), to: Calendar.current.startOfDay(for: Date())).day
-    }
-    private var undepositedIsStale: Bool { (oldestUndepositedAgeDays ?? 0) >= 14 }
 
-    private var missingReceiptCount: Int {
-        let attachedRequestIDs = Set(reimbursementAttachments.compactMap(\.requestID))
-        return submittedReimbursements.filter { !attachedRequestIDs.contains($0.id) }.count
-    }
-    private var currentBudgetRemaining: Int64? {
-        let period = ReportingPeriod.containing(Date())
-        guard let budget = budgets.first(where: {
-            $0.reportingYearStart == period.startingYear && $0.status == .approved
-        }) else { return nil }
-        let budgetedExpenses = budgetLines
-            .filter { $0.budgetID == budget.id && $0.direction == .expense }
-            .reduce(0) { $0 + $1.amountCents }
-        let spent = transactions
-            .filter { period.contains($0.date) && $0.direction == .expense && !$0.isTransfer }
-            .reduce(0) { $0 + $1.amountCents }
-        return budgetedExpenses - spent
-    }
-    private var closeTasksComplete: Int {
-        [
-            cashPosition.undepositedFundsCents == 0,
-            missingReceiptCount == 0,
-            unclearedTransactions.isEmpty,
-            reconciliationIsCurrent,
-        ].filter { $0 }.count
-    }
-    private var reconciliationIsCurrent: Bool {
-        guard let statementDate = latestReconciliation?.statementDate,
-              let previousMonth = Calendar.current.date(byAdding: .month, value: -1, to: Date()),
-              let expected = Calendar.current.dateInterval(of: .month, for: previousMonth)?.start else { return false }
-        return statementDate >= expected
-    }
     private var troopProfile: TroopProfileRecord? { troopProfiles.first }
     private var greeting: String {
         let salutation: String
@@ -110,7 +174,8 @@ struct DashboardView: View {
     }
 
     var body: some View {
-        ScrollView {
+        let metrics = self.metrics
+        return ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
                     if let troopProfile, TroopReportIdentity(profile: troopProfile).hasProfile {
@@ -150,27 +215,27 @@ struct DashboardView: View {
                 } else {
                     ViewThatFits(in: .horizontal) {
                         HStack(alignment: .top, spacing: 14) {
-                            balancePanel.frame(maxWidth: .infinity)
-                            attentionPanel.frame(width: 330)
+                            balancePanel(metrics).frame(maxWidth: .infinity)
+                            attentionPanel(metrics).frame(width: 330)
                         }
                         VStack(spacing: 14) {
-                            balancePanel
-                            attentionPanel
+                            balancePanel(metrics)
+                            attentionPanel(metrics)
                         }
                     }
 
                     ViewThatFits(in: .horizontal) {
                         HStack(alignment: .top, spacing: 14) {
-                            monthClosePanel.frame(maxWidth: .infinity)
+                            monthClosePanel(metrics).frame(maxWidth: .infinity)
                             recentActivityPanel.frame(maxWidth: .infinity)
                         }
                         VStack(spacing: 14) {
-                            monthClosePanel
+                            monthClosePanel(metrics)
                             recentActivityPanel
                         }
                     }
 
-                    upcomingEventsPanel
+                    upcomingEventsPanel(metrics.upcomingEvents)
                 }
             }
             .padding(20)
@@ -184,8 +249,8 @@ struct DashboardView: View {
         }
         .sheet(isPresented: $showingNewTransaction) { TransactionFormView() }
         .task { await checkCloudAccount() }
-        .onAppear { previousCloseTasksComplete = closeTasksComplete }
-        .onChange(of: closeTasksComplete) { _, newValue in
+        .onAppear { previousCloseTasksComplete = metrics.closeTasksComplete }
+        .onChange(of: metrics.closeTasksComplete) { _, newValue in
             if ScoutMotion.shouldCelebrateTransition(
                 previous: previousCloseTasksComplete,
                 current: newValue,
@@ -203,33 +268,33 @@ struct DashboardView: View {
         )
     }
 
-    private var balancePanel: some View {
+    private func balancePanel(_ metrics: DashboardMetrics) -> some View {
         FieldbookPanel {
             VStack(alignment: .leading, spacing: 18) {
                 HStack(alignment: .top) {
                     FieldbookActivityEmblem(systemImage: "banknote.fill")
                     VStack(alignment: .leading, spacing: 6) {
-                        Label(primaryAccount?.name ?? "Available cash", systemImage: "building.columns")
+                        Label(metrics.primaryAccount?.name ?? "Available cash", systemImage: "building.columns")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.secondary)
-                        Text(Money.currency(cents: cashPosition.totalCents))
+                        Text(Money.currency(cents: metrics.cashPosition.totalCents))
                             .font(.system(size: 36, weight: .bold, design: .rounded))
                             .monospacedDigit()
                     }
                     Spacer(minLength: 12)
-                    reconciliationBadge
+                    reconciliationBadge(metrics.latestReconciliation)
                 }
 
                 Divider()
 
                 HStack(spacing: 0) {
-                    summaryValue("Undeposited funds", Money.currency(cents: cashPosition.undepositedFundsCents))
+                    summaryValue("Undeposited funds", Money.currency(cents: metrics.cashPosition.undepositedFundsCents))
                     Divider().frame(height: 40).padding(.horizontal, 16)
-                    summaryValue("Member balances due", Money.currency(cents: outstandingMemberBalances))
+                    summaryValue("Member balances due", Money.currency(cents: metrics.outstandingMemberBalancesCents))
                     Divider().frame(height: 40).padding(.horizontal, 16)
                     summaryValue(
-                        currentBudgetRemaining == nil ? "Active members" : "Budget remaining",
-                        currentBudgetRemaining.map { Money.currency(cents: $0) } ?? String(people.filter(\.isActive).count)
+                        metrics.currentBudgetRemainingCents == nil ? "Active members" : "Budget remaining",
+                        metrics.currentBudgetRemainingCents.map { Money.currency(cents: $0) } ?? String(metrics.activeMemberCount)
                     )
                 }
             }
@@ -237,7 +302,7 @@ struct DashboardView: View {
     }
 
     @ViewBuilder
-    private var reconciliationBadge: some View {
+    private func reconciliationBadge(_ latestReconciliation: ReconciliationRecord?) -> some View {
         if let latestReconciliation {
             Label(
                 "Reconciled through \(latestReconciliation.statementDate.formatted(date: .abbreviated, time: .omitted))",
@@ -258,8 +323,9 @@ struct DashboardView: View {
         }
     }
 
-    private var attentionPanel: some View {
-        FieldbookPanel {
+    private func attentionPanel(_ metrics: DashboardMetrics) -> some View {
+        let attentionCount = metrics.attentionCount
+        return FieldbookPanel {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Text("Needs attention")
@@ -279,60 +345,58 @@ struct DashboardView: View {
                         .foregroundStyle(Color.fieldbookPositive)
                         .padding(.vertical, 18)
                 } else {
-                    if !unclearedTransactions.isEmpty {
-                        attentionRow(title: "\(unclearedTransactions.count) uncleared transactions", detail: oldestUnclearedDescription, systemImage: "clock.arrow.circlepath", destination: .reconcile)
+                    if metrics.unclearedBankTransactionCount > 0 {
+                        attentionRow(
+                            title: "\(metrics.unclearedBankTransactionCount) uncleared transactions",
+                            detail: metrics.oldestUnclearedDate.map { "Oldest is \($0.formatted(date: .abbreviated, time: .omitted))" } ?? "",
+                            systemImage: "clock.arrow.circlepath",
+                            destination: .reconcile
+                        )
                     }
-                    if undepositedIsStale, let days = oldestUndepositedAgeDays {
-                        attentionRow(title: "Cash held undeposited for \(days) days", detail: Money.currency(cents: cashPosition.undepositedFundsCents) + " awaiting deposit", systemImage: "tray.full", destination: .deposits)
+                    if metrics.undepositedIsStale, let days = metrics.oldestUndepositedAgeDays {
+                        attentionRow(title: "Cash held undeposited for \(days) days", detail: Money.currency(cents: metrics.cashPosition.undepositedFundsCents) + " awaiting deposit", systemImage: "tray.full", destination: .deposits)
                     }
-                    if outstandingMemberBalances > 0 {
-                        attentionRow(title: "Member balances are outstanding", detail: Money.currency(cents: outstandingMemberBalances) + " total", systemImage: "person.crop.circle.badge.exclamationmark", destination: .people)
+                    if metrics.outstandingMemberBalancesCents > 0 {
+                        attentionRow(title: "Member balances are outstanding", detail: Money.currency(cents: metrics.outstandingMemberBalancesCents) + " total", systemImage: "person.crop.circle.badge.exclamationmark", destination: .people)
                     }
-                    if missingReceiptCount > 0 {
-                        attentionRow(title: "\(missingReceiptCount) reimbursement receipt\(missingReceiptCount == 1 ? "" : "s") missing", detail: "Complete the supporting record", systemImage: "doc.badge.plus", destination: .reimbursements)
+                    if metrics.missingReceiptCount > 0 {
+                        attentionRow(title: "\(metrics.missingReceiptCount) reimbursement receipt\(metrics.missingReceiptCount == 1 ? "" : "s") missing", detail: "Complete the supporting record", systemImage: "doc.badge.plus", destination: .reimbursements)
                     }
-                    if !reconciliationIsCurrent {
-                        attentionRow(title: "Monthly reconciliation is due", detail: latestReconciliationDescription, systemImage: "checkmark.seal", destination: .reconcile)
+                    if !metrics.reconciliationIsCurrent {
+                        attentionRow(
+                            title: "Monthly reconciliation is due",
+                            detail: metrics.latestReconciliation.map { "Last completed \($0.statementDate.formatted(date: .abbreviated, time: .omitted))" } ?? "No completed reconciliation",
+                            systemImage: "checkmark.seal",
+                            destination: .reconcile
+                        )
                     }
                 }
             }
         }
     }
 
-    private var attentionCount: Int {
-        [!unclearedTransactions.isEmpty, undepositedIsStale, outstandingMemberBalances > 0, missingReceiptCount > 0, !reconciliationIsCurrent]
-            .filter { $0 }.count
-    }
-
-    private var oldestUnclearedDescription: String {
-        guard let date = unclearedTransactions.map(\.date).min() else { return "" }
-        return "Oldest is \(date.formatted(date: .abbreviated, time: .omitted))"
-    }
-
-    private var latestReconciliationDescription: String {
-        guard let latestReconciliation else { return "No completed reconciliation" }
-        return "Last completed \(latestReconciliation.statementDate.formatted(date: .abbreviated, time: .omitted))"
-    }
-
-    private var monthClosePanel: some View {
-        FieldbookPanel {
+    private func monthClosePanel(_ metrics: DashboardMetrics) -> some View {
+        let completed = metrics.closeTasksComplete
+        let undeposited = metrics.cashPosition.undepositedFundsCents
+        return FieldbookPanel {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("Monthly close").font(.headline)
                     Spacer()
-                    Text("\(closeTasksComplete) of 4 complete").font(.caption).foregroundStyle(.secondary)
+                    Text("\(completed) of 4 complete").font(.caption).foregroundStyle(.secondary)
                 }
-                ScoutTrailProgress(completed: closeTasksComplete, total: 4)
-                closeTask("Deposit received funds", isComplete: cashPosition.undepositedFundsCents == 0, detail: cashPosition.undepositedFundsCents == 0 ? "Done" : Money.currency(cents: cashPosition.undepositedFundsCents), destination: .deposits)
-                closeTask("Attach reimbursement receipts", isComplete: missingReceiptCount == 0, detail: missingReceiptCount == 0 ? "Done" : "\(missingReceiptCount) open", destination: .reimbursements)
-                closeTask("Clear matched transactions", isComplete: unclearedTransactions.isEmpty, detail: unclearedTransactions.isEmpty ? "Done" : "\(unclearedTransactions.count) open", destination: .reconcile)
-                closeTask("Finish reconciliation", isComplete: reconciliationIsCurrent, detail: reconciliationIsCurrent ? "Done" : "Next", destination: .reconcile)
+                ScoutTrailProgress(completed: completed, total: 4)
+                closeTask("Deposit received funds", isComplete: undeposited == 0, detail: undeposited == 0 ? "Done" : Money.currency(cents: undeposited), destination: .deposits)
+                closeTask("Attach reimbursement receipts", isComplete: metrics.missingReceiptCount == 0, detail: metrics.missingReceiptCount == 0 ? "Done" : "\(metrics.missingReceiptCount) open", destination: .reimbursements)
+                closeTask("Clear matched transactions", isComplete: metrics.unclearedBankTransactionCount == 0, detail: metrics.unclearedBankTransactionCount == 0 ? "Done" : "\(metrics.unclearedBankTransactionCount) open", destination: .reconcile)
+                closeTask("Finish reconciliation", isComplete: metrics.reconciliationIsCurrent, detail: metrics.reconciliationIsCurrent ? "Done" : "Next", destination: .reconcile)
             }
         }
     }
 
     private var recentActivityPanel: some View {
-        FieldbookPanel {
+        let recent = Array(transactions.prefix(5))
+        return FieldbookPanel {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Text("Recent activity").font(.headline)
@@ -343,10 +407,10 @@ struct DashboardView: View {
                 }
                 .padding(.bottom, 7)
 
-                if transactions.isEmpty {
+                if recent.isEmpty {
                     Text("No transactions yet").foregroundStyle(.secondary).padding(.vertical, 18)
                 } else {
-                    ForEach(Array(transactions.prefix(5))) { transaction in
+                    ForEach(recent) { transaction in
                         Button { onOpenSection(.transactions) } label: {
                             HStack(spacing: 10) {
                                 Image(systemName: transaction.direction == .income ? "arrow.down.left" : "arrow.up.right")
@@ -368,14 +432,14 @@ struct DashboardView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        if transaction.id != transactions.prefix(5).last?.id { Divider() }
+                        if transaction.id != recent.last?.id { Divider() }
                     }
                 }
             }
         }
     }
 
-    private var upcomingEventsPanel: some View {
+    private func upcomingEventsPanel(_ upcomingEvents: [EventRecord]) -> some View {
         FieldbookPanel {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {

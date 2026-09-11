@@ -84,12 +84,14 @@ enum TreasurerReportService {
         let opening = cashPosition(accounts: accounts, transactions: transactions.filter { $0.date < start })
         let endingTransactions = transactions.filter { $0.date < endExclusive }
         let ending = cashPosition(accounts: accounts, transactions: endingTransactions)
-        let balances = Dictionary(grouping: memberEntries.filter { $0.date < endExclusive }, by: \.personID)
-        let outstanding = people.reduce(Int64(0)) { total, person in
-            total + max(0, balances[person.id]?.reduce(Int64(0)) { $0 + $1.balanceEffectCents } ?? 0)
-        }
-        let credits = people.reduce(Int64(0)) { total, person in
-            total + min(0, balances[person.id]?.reduce(Int64(0)) { $0 + $1.balanceEffectCents } ?? 0)
+        // One pass over the member ledger; each person's entries used to be summed twice.
+        let balances = FinanceEngine.memberBalances(entries: memberEntries.filter { $0.date < endExclusive })
+        var outstanding: Int64 = 0
+        var credits: Int64 = 0
+        for person in people {
+            let balance = balances[person.id] ?? 0
+            outstanding += max(0, balance)
+            credits += min(0, balance)
         }
         // ReportingPeriod owns its Gregorian calendar so month 9 means September; only the day boundaries
         // above come from the caller's calendar. Passing a non-Gregorian device calendar built the period
@@ -106,8 +108,9 @@ enum TreasurerReportService {
         let budgetLabel = budget.map {
             "\($0.status == .approved ? "Approved Revision \($0.revision)" : "Working Budget") • \(reportPeriod.label) year to date"
         } ?? ""
+        let endingBalances = FinanceEngine.bookBalances(accounts: accounts, transactions: endingTransactions)
         let reportAccounts = accounts.filter { account in
-            (account.isActive || FinanceEngine.bookBalance(account: account, transactions: endingTransactions) != 0)
+            (account.isActive || (endingBalances[account.id] ?? account.openingBalanceCents) != 0)
                 && account.kind != .cash
                 && account.kind != .undepositedFunds
         }
@@ -206,13 +209,14 @@ enum TreasurerReportService {
     }
 
     private static func annualReport(for transactions: [LedgerTransaction]) -> AnnualReport {
+        // Same folded grouping as the Reports screen: this report grouped on the exact trimmed spelling, so
+        // "Dues" and "dues" were two lines in the committee package while Reports showed one.
         func totals(_ direction: TransactionDirection) -> [CategoryTotal] {
-            Dictionary(grouping: transactions.filter { $0.direction == direction }, by: { transaction in
-                let name = transaction.category.trimmingCharacters(in: .whitespacesAndNewlines)
-                return name.isEmpty ? "Uncategorized" : name
-            })
-                .map { CategoryTotal(category: $0.key, amountCents: $0.value.reduce(Int64(0)) { $0 + $1.amountCents }) }
-                .sorted { $0.category.localizedStandardCompare($1.category) == .orderedAscending }
+            FinanceEngine.categoryTotals(for: transactions.filter { $0.direction == direction })
+                .sorted {
+                    if $0.category == $1.category { return $0.amountCents > $1.amountCents }
+                    return $0.category.localizedStandardCompare($1.category) == .orderedAscending
+                }
         }
         return AnnualReport(income: totals(.income), expenses: totals(.expense))
     }
@@ -484,7 +488,7 @@ private struct PDFTextWriter {
     }
 
     private mutating func draw(_ value: String, x: CGFloat = 42, size: CGFloat, bold: Bool, color: CGFloat, height: CGFloat, width: CGFloat = 528, alignment: CTTextAlignment = .left, advance: Bool = true) {
-        let font = CTFontCreateWithName((bold ? "Helvetica-Bold" : "Helvetica") as CFString, size, nil)
+        let font = PDFFontCache.font(size: size, bold: bold)
         let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: CGColor(gray: color, alpha: 1)]
         let attributed = NSAttributedString(string: value, attributes: attributes)
         let line = CTLineCreateWithAttributedString(attributed)

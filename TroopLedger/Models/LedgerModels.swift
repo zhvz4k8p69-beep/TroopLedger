@@ -196,14 +196,21 @@ enum TroopPosition: String, CaseIterable, Identifiable, Codable {
     static func matching(_ value: String) -> TroopPosition? {
         let normalized = value.normalizedScoutingLabel
         guard !normalized.isEmpty else { return nil }
-        if let exact = allCases.first(where: { $0.displayName.normalizedScoutingLabel == normalized }) {
-            return exact
-        }
+        if let exact = byNormalizedDisplayName[normalized] { return exact }
         if let alias = aliases[normalized] { return alias }
-        return allCases
-            .sorted { $0.displayName.count > $1.displayName.count }
-            .first { normalized.contains($0.displayName.normalizedScoutingLabel) }
+        return longestFirst.first { normalized.contains($0.label) }?.position
     }
+
+    /// Folded once. `matching` runs up to three times per Scoutbook roster row, and each call re-folded all
+    /// thirty display names and re-sorted them by length.
+    private static let byNormalizedDisplayName: [String: TroopPosition] = Dictionary(
+        allCases.map { ($0.displayName.normalizedScoutingLabel, $0) },
+        uniquingKeysWith: { first, _ in first }
+    )
+
+    private static let longestFirst: [(position: TroopPosition, label: String)] = allCases
+        .map { ($0, $0.displayName.normalizedScoutingLabel) }
+        .sorted { $0.1.count > $1.1.count }
 
     private static let aliases: [String: TroopPosition] = [
         "spl": .seniorPatrolLeader,

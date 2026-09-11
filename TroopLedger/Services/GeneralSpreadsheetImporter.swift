@@ -115,14 +115,32 @@ struct GeneralSpreadsheetPreviewRow: Identifiable, Equatable {
 struct GeneralSpreadsheetPreview: Equatable {
     let mappingIssues: [String]
     let rows: [GeneralSpreadsheetPreviewRow]
+    /// Partitioned once. The import screen reads these from several places in one render and the import
+    /// itself six times; each access re-filtered up to 25,000 rows.
+    let validRows: [GeneralSpreadsheetPreviewRow]
+    let invalidRows: [GeneralSpreadsheetPreviewRow]
+    let totalIncomeCents: Int64
+    let totalExpenseCents: Int64
 
-    var validRows: [GeneralSpreadsheetPreviewRow] { rows.filter(\.isValid) }
-    var invalidRows: [GeneralSpreadsheetPreviewRow] { rows.filter { !$0.isValid } }
-    var totalIncomeCents: Int64 {
-        validRows.compactMap(\.draft).filter { $0.direction == .income }.reduce(0) { $0 + $1.amountCents }
-    }
-    var totalExpenseCents: Int64 {
-        validRows.compactMap(\.draft).filter { $0.direction == .expense }.reduce(0) { $0 + $1.amountCents }
+    init(mappingIssues: [String], rows: [GeneralSpreadsheetPreviewRow]) {
+        self.mappingIssues = mappingIssues
+        self.rows = rows
+        var valid: [GeneralSpreadsheetPreviewRow] = []
+        var invalid: [GeneralSpreadsheetPreviewRow] = []
+        var income: Int64 = 0
+        var expense: Int64 = 0
+        for row in rows {
+            if row.isValid, let draft = row.draft {
+                valid.append(row)
+                if draft.direction == .income { income += draft.amountCents } else { expense += draft.amountCents }
+            } else {
+                invalid.append(row)
+            }
+        }
+        validRows = valid
+        invalidRows = invalid
+        totalIncomeCents = income
+        totalExpenseCents = expense
     }
 }
 
@@ -142,6 +160,7 @@ enum GeneralSpreadsheetImportError: LocalizedError, Equatable {
     case noImportableRows
     case accountNotFound
     case inactiveAccount
+    case holdingAccountOverdrawn(String)
 
     var errorDescription: String? {
         switch self {
@@ -155,6 +174,7 @@ enum GeneralSpreadsheetImportError: LocalizedError, Equatable {
         case .noImportableRows: "No rows passed the import validation."
         case .accountNotFound: "Choose an existing account for these transactions."
         case .inactiveAccount: "The destination account is inactive. Reactivate it or choose an active account."
+        case .holdingAccountOverdrawn(let message): message
         }
     }
 }
@@ -236,14 +256,16 @@ enum GeneralSpreadsheetImporter {
             )
         }
         let existing = ExistingTransactionIndex(transactions: existingTransactions, accountID: accountID, calendar: calendar)
+        // The account's lock date is the same for every row; it was recomputed from the reconciliation
+        // table for each of up to 25,000 rows on every mapping change.
+        let lockDate = PeriodLocking.latestLockDate(for: accountID, reconciliations: reconciliations, calendar: calendar)
         let rows = document.rows.map { row in
             previewRow(
                 row,
                 mapping: mapping,
-                accountID: accountID,
                 defaultDirection: defaultDirection,
                 defaultCategory: defaultCategory,
-                reconciliations: reconciliations,
+                lockDate: lockDate,
                 existing: existing,
                 calendar: calendar
             )
@@ -263,15 +285,17 @@ enum GeneralSpreadsheetImporter {
         calendar: Calendar = .current,
         into modelContext: ModelContext
     ) throws -> GeneralSpreadsheetImportResult {
-        guard let accountID,
-              let account = try modelContext.fetch(FetchDescriptor<AccountRecord>()).first(where: { $0.id == accountID }) else {
-            throw GeneralSpreadsheetImportError.accountNotFound
-        }
+        guard let accountID else { throw GeneralSpreadsheetImportError.accountNotFound }
+        var oneAccount = FetchDescriptor<AccountRecord>(predicate: #Predicate { $0.id == accountID })
+        oneAccount.fetchLimit = 1
+        guard let account = try modelContext.fetch(oneAccount).first else { throw GeneralSpreadsheetImportError.accountNotFound }
         guard account.isActive else { throw GeneralSpreadsheetImportError.inactiveAccount }
-        let history = try modelContext.fetch(FetchDescriptor<GeneralSpreadsheetImportRecord>())
-        guard !history.contains(where: { $0.sourceFingerprint == document.fingerprint }) else {
+        let fingerprint = document.fingerprint
+        let history = FetchDescriptor<GeneralSpreadsheetImportRecord>(predicate: #Predicate { $0.sourceFingerprint == fingerprint })
+        guard try modelContext.fetchCount(history) == 0 else {
             throw GeneralSpreadsheetImportError.alreadyImported
         }
+        let existingTransactions = try modelContext.fetch(FetchDescriptor<LedgerTransaction>())
         let preview = preview(
             document: document,
             mapping: mapping,
@@ -279,12 +303,24 @@ enum GeneralSpreadsheetImporter {
             defaultDirection: defaultDirection,
             defaultCategory: defaultCategory,
             reconciliations: reconciliations,
-            existingTransactions: try modelContext.fetch(FetchDescriptor<LedgerTransaction>()),
+            existingTransactions: existingTransactions,
             calendar: calendar
         )
         guard preview.mappingIssues.isEmpty else { throw GeneralSpreadsheetImportError.invalidMapping }
         guard !preview.validRows.isEmpty else { throw GeneralSpreadsheetImportError.noImportableRows }
         guard skipExceptions || preview.invalidRows.isEmpty else { throw GeneralSpreadsheetImportError.unresolvedExceptions }
+        // A cash box or Undeposited Funds holds physical money. Manual entries, transfers, deposits, and
+        // reimbursement payments all refuse to take out more than is there; a spreadsheet of expenses must too.
+        if account.kind == .cash || account.kind == .undepositedFunds {
+            let delta = preview.validRows.compactMap(\.draft).reduce(Int64(0)) { total, draft in
+                total + (draft.direction == .income ? draft.amountCents : -draft.amountCents)
+            }
+            let projected = FinanceEngine.bookBalance(account: account, transactions: existingTransactions) + delta
+            if projected < 0 {
+                let shortfall = HoldingAccountValidationError.wouldOverdraw(accountName: account.name, shortfallCents: -projected)
+                throw GeneralSpreadsheetImportError.holdingAccountOverdrawn(shortfall.localizedDescription)
+            }
+        }
 
         // rollback() below discards every unsaved change in the shared context, so persist unrelated
         // pending edits first; a failed import must only undo the import itself.
@@ -367,10 +403,9 @@ enum GeneralSpreadsheetImporter {
     private static func previewRow(
         _ row: GeneralSpreadsheetRow,
         mapping: TransactionColumnMapping,
-        accountID: UUID?,
         defaultDirection: TransactionDirection,
         defaultCategory: String,
-        reconciliations: [ReconciliationRecord],
+        lockDate: Date?,
         existing: ExistingTransactionIndex,
         calendar: Calendar
     ) -> GeneralSpreadsheetPreviewRow {
@@ -389,7 +424,7 @@ enum GeneralSpreadsheetImporter {
         guard let amount = parsedAmount.value else {
             return .init(sourceRow: row.id, draft: nil, issues: [parsedAmount.issue ?? "Unrecognized amount."])
         }
-        if PeriodLocking.isLocked(accountID: accountID, date: date, reconciliations: reconciliations, calendar: calendar) {
+        if let lockDate, calendar.startOfDay(for: date) <= lockDate {
             issues.append("Date falls in a reconciled, locked period.")
         }
 
@@ -467,10 +502,16 @@ enum GeneralSpreadsheetImporter {
         if income.contains(normalized) { return .income }
         if expense.contains(normalized) { return .expense }
         // Bank "Type" columns rarely say just "debit": "ACH Debit", "POS Purchase", "Check Card Payment",
-        // "Interest Paid", "Credit Card Payment". Expense words win so "credit card payment" is an expense.
+        // "Interest Payment", "Mobile Check Deposit", "Credit Card Payment". Words that name money coming in
+        // (deposit, interest, dividend, refund) outrank the generic expense words, so "Interest Payment" and
+        // "Mobile Check Deposit" are income; the weak "credit" still loses to "payment" so a card payment is
+        // an expense. Returned items and fees are debits even when they name a deposit.
         let lower = value.lowercased()
-        let expenseWords = ["debit", "withdraw", "purchase", "pos ", "payment", "check", "fee", "charge", "bill pay", "transfer out"]
-        let incomeWords = ["credit", "deposit", "interest", "refund", "dividend", "income", "received", "transfer in", "reversal"]
+        if lower.contains("return") || lower.contains("fee") || lower.contains("charge") { return .expense }
+        let strongIncomeWords = ["deposit", "interest", "dividend", "refund", "received", "transfer in"]
+        if strongIncomeWords.contains(where: lower.contains) { return .income }
+        let expenseWords = ["debit", "withdraw", "purchase", "pos ", "payment", "check", "bill pay", "transfer out"]
+        let incomeWords = ["credit", "income", "reversal"]
         if expenseWords.contains(where: lower.contains) { return .expense }
         if incomeWords.contains(where: lower.contains) { return .income }
         return nil
