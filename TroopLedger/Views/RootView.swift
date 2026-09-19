@@ -191,6 +191,8 @@ struct RootView: View {
     @State private var selection: AppSection? = .dashboard
 #if os(macOS)
     @AppStorage("navigationSidebarIsCompact") private var sidebarIsCompact = false
+    /// Bumped on every sidebar click so re-choosing the current section also pops to its root.
+    @State private var stackGeneration = 0
 #endif
 #if os(iOS)
     @State private var showingPreferences = false
@@ -202,7 +204,10 @@ struct RootView: View {
             MacNavigationSidebar(
                 selection: Binding(
                     get: { selection ?? .dashboard },
-                    set: { selection = $0 }
+                    set: { section in
+                        selection = section
+                        stackGeneration += 1
+                    }
                 ),
                 isCompact: $sidebarIsCompact
             )
@@ -210,10 +215,13 @@ struct RootView: View {
 
             Divider()
 
+            // Identity on the stack itself (not just its root) so choosing another
+            // sidebar section discards any pushed detail pages instead of leaving
+            // them stacked over the new root.
             NavigationStack {
                 sectionView(selection ?? .dashboard)
-                    .id(selection ?? .dashboard)
             }
+            .id("\(selection ?? .dashboard)-\(stackGeneration)")
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 900, minHeight: 620)
@@ -237,6 +245,7 @@ struct RootView: View {
             NavigationStack {
                 sectionView(selection ?? .dashboard)
             }
+            .id(selection ?? .dashboard)
         }
 #if os(iOS)
         .toolbar {
