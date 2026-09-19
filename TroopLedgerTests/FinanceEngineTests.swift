@@ -1599,6 +1599,59 @@ final class FinanceEngineTests: XCTestCase {
         XCTAssertEqual(calculation.suggestedFeeCents, 2_800)
     }
 
+    func testEventCostEstimatesRollUpIntoPerPersonFee() {
+        // A weekend at camp: cabin $450 total, food $18 a head, one $60 program fee. 20 scouts, 10% contingency.
+        let lines = [
+            EventCostEstimateLine(category: .lodging, label: "Cabin", amountCents: 45_000, basis: .total),
+            EventCostEstimateLine(category: .food, label: "", amountCents: 1_800, basis: .perPerson),
+            EventCostEstimateLine(category: .program, label: "Climbing wall", amountCents: 6_000, basis: .total),
+        ]
+        XCTAssertEqual(EventCostEstimates.fixedCostsCents(lines), 51_000)
+        XCTAssertEqual(EventCostEstimates.perPersonCostsCents(lines), 1_800)
+
+        let calculation = EventCostEstimates.calculate(lines: lines, expectedParticipants: 20, contingencyBasisPoints: 1_000)
+        XCTAssertEqual(calculation.baseTotalCents, 87_000)
+        XCTAssertEqual(calculation.contingencyCents, 8_700)
+        XCTAssertEqual(calculation.exactBreakEvenFeeCents, 4_785)
+        XCTAssertEqual(calculation.suggestedFeeCents, 4_800)
+
+        // Per-line shares: the cabin splits 20 ways (rounded up), food is unchanged, and a total with no
+        // participants has no share rather than a misleading zero.
+        XCTAssertEqual(lines[0].perPersonShareCents(expectedParticipants: 20), 2_250)
+        XCTAssertEqual(lines[1].perPersonShareCents(expectedParticipants: 20), 1_800)
+        XCTAssertEqual(lines[2].perPersonShareCents(expectedParticipants: 7), 858)
+        XCTAssertNil(lines[0].perPersonShareCents(expectedParticipants: 0))
+        XCTAssertEqual(lines[1].perPersonShareCents(expectedParticipants: 0), 1_800)
+        XCTAssertEqual(lines[1].displayName, "Food")
+        XCTAssertEqual(lines[0].displayName, "Cabin")
+    }
+
+    func testEventCostEstimatesRoundTripAndMigrateLegacyLumpSums() {
+        let lines = [
+            EventCostEstimateLine(category: .lodging, label: "Cabin", amountCents: 45_000, basis: .total),
+            EventCostEstimateLine(category: .food, label: "5 meals", amountCents: 1_800, basis: .perPerson),
+        ]
+        let json = EventCostEstimates.encode(lines)
+        XCTAssertFalse(json.isEmpty)
+        XCTAssertEqual(EventCostEstimates.decode(json), lines)
+        XCTAssertEqual(EventCostEstimates.encode([]), "")
+        XCTAssertEqual(EventCostEstimates.decode(""), [])
+        XCTAssertEqual(EventCostEstimates.decode("not json"), [])
+
+        // An event planned before itemization opens with its two lump sums as editable lines, and an event with
+        // stored lines ignores the (derived) lump sums.
+        let legacy = EventRecord(name: "Klondike", startDate: Date(), endDate: Date())
+        legacy.feeCalculatorFixedCostsCents = 25_000
+        legacy.feeCalculatorPerPersonCostsCents = 1_250
+        let migrated = EventCostEstimates.lines(for: legacy)
+        XCTAssertEqual(migrated.map(\.basis), [.total, .perPerson])
+        XCTAssertEqual(migrated.map(\.amountCents), [25_000, 1_250])
+        XCTAssertEqual(EventCostEstimates.fixedCostsCents(migrated), 25_000)
+        legacy.feeCalculatorEstimateLinesJSON = json
+        XCTAssertEqual(EventCostEstimates.lines(for: legacy), lines)
+        XCTAssertEqual(EventCostEstimates.lines(for: EventRecord(name: "Empty", startDate: Date(), endDate: Date())), [])
+    }
+
     @MainActor
     func testEventCloseoutFreezesRosterPostsAdjustmentsAndRejectsDuplicate() throws {
         let container = try ModelContainerFactory.makeInMemoryContainer()

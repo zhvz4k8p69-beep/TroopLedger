@@ -13,6 +13,115 @@ struct EventFeeCalculation: Equatable {
     let suggestedFeeCents: Int64
 }
 
+/// What an estimated cost line covers. Stored by raw value, so renaming a case needs a migration.
+enum EventCostCategory: String, Codable, CaseIterable, Identifiable {
+    case lodging = "Campsite / Cabin"
+    case food = "Food"
+    case transportation = "Transportation"
+    case program = "Program / Activities"
+    case supplies = "Supplies"
+    case other = "Other"
+
+    var id: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .lodging: "tent.fill"
+        case .food: "fork.knife"
+        case .transportation: "bus.fill"
+        case .program: "figure.hiking"
+        case .supplies: "shippingbox.fill"
+        case .other: "ellipsis.circle.fill"
+        }
+    }
+}
+
+/// Whether an estimate is one amount for the whole event (split among participants) or an amount per participant.
+enum EventCostBasis: String, Codable, CaseIterable, Identifiable {
+    case total = "Total for the event"
+    case perPerson = "Per person"
+
+    var id: String { rawValue }
+}
+
+/// One planned expense in an event's fee plan: "Cabin rental, $450 total" or "Food, $18 per person".
+struct EventCostEstimateLine: Codable, Equatable, Hashable, Identifiable {
+    var id: UUID = UUID()
+    var category: EventCostCategory = .other
+    var label: String = ""
+    var amountCents: Int64 = 0
+    var basis: EventCostBasis = .total
+
+    /// The description shown in lists: the label when given, otherwise the category name.
+    var displayName: String {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? category.rawValue : trimmed
+    }
+
+    /// This line's share of one participant's fee before contingency. A total split among zero participants is
+    /// undefined, so it reports nothing rather than a misleading zero.
+    func perPersonShareCents(expectedParticipants: Int) -> Int64? {
+        switch basis {
+        case .perPerson: return max(0, amountCents)
+        case .total:
+            guard expectedParticipants > 0 else { return nil }
+            return EventFeeCalculator.divideRoundingUp(max(0, amountCents), by: Int64(expectedParticipants))
+        }
+    }
+}
+
+/// Encodes the estimate lines on `EventRecord.feeCalculatorEstimateLinesJSON` and rolls them up into the
+/// fixed/per-person totals the break-even calculator takes.
+enum EventCostEstimates {
+    private static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }()
+
+    static func decode(_ json: String) -> [EventCostEstimateLine] {
+        guard let data = json.data(using: .utf8), !data.isEmpty else { return [] }
+        return (try? JSONDecoder().decode([EventCostEstimateLine].self, from: data)) ?? []
+    }
+
+    static func encode(_ lines: [EventCostEstimateLine]) -> String {
+        guard !lines.isEmpty, let data = try? encoder.encode(lines) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// The lines for an event. An event planned before itemization carried only two lump sums; those become
+    /// "Other" lines so the plan opens with the same numbers it was saved with.
+    static func lines(for event: EventRecord) -> [EventCostEstimateLine] {
+        let stored = decode(event.feeCalculatorEstimateLinesJSON)
+        if !stored.isEmpty { return stored }
+        var migrated: [EventCostEstimateLine] = []
+        if event.feeCalculatorFixedCostsCents > 0 {
+            migrated.append(EventCostEstimateLine(category: .other, label: "Fixed costs", amountCents: event.feeCalculatorFixedCostsCents, basis: .total))
+        }
+        if event.feeCalculatorPerPersonCostsCents > 0 {
+            migrated.append(EventCostEstimateLine(category: .other, label: "Per-person costs", amountCents: event.feeCalculatorPerPersonCostsCents, basis: .perPerson))
+        }
+        return migrated
+    }
+
+    static func fixedCostsCents(_ lines: [EventCostEstimateLine]) -> Int64 {
+        lines.filter { $0.basis == .total }.reduce(Int64(0)) { EventFeeCalculator.addClamped($0, max(0, $1.amountCents)) }
+    }
+
+    static func perPersonCostsCents(_ lines: [EventCostEstimateLine]) -> Int64 {
+        lines.filter { $0.basis == .perPerson }.reduce(Int64(0)) { EventFeeCalculator.addClamped($0, max(0, $1.amountCents)) }
+    }
+
+    static func calculate(lines: [EventCostEstimateLine], expectedParticipants: Int, contingencyBasisPoints: Int) -> EventFeeCalculation {
+        EventFeeCalculator.calculate(
+            fixedCostsCents: fixedCostsCents(lines),
+            perPersonCostsCents: perPersonCostsCents(lines),
+            expectedParticipants: expectedParticipants,
+            contingencyBasisPoints: contingencyBasisPoints
+        )
+    }
+}
+
 enum EventFeeCalculator {
     static func calculate(
         fixedCostsCents: Int64,
@@ -44,12 +153,12 @@ enum EventFeeCalculator {
         )
     }
 
-    private static func divideRoundingUp(_ value: Int64, by divisor: Int64) -> Int64 {
+    static func divideRoundingUp(_ value: Int64, by divisor: Int64) -> Int64 {
         guard value > 0, divisor > 0 else { return 0 }
         return value / divisor + (value % divisor == 0 ? 0 : 1)
     }
 
-    private static func addClamped(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+    static func addClamped(_ lhs: Int64, _ rhs: Int64) -> Int64 {
         let result = lhs.addingReportingOverflow(rhs)
         return result.overflow ? .max : result.partialValue
     }

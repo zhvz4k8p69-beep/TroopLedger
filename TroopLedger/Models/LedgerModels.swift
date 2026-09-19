@@ -937,6 +937,9 @@ final class EventRecord {
     var feeCalculatorExpectedParticipants: Int = 0
     var feeCalculatorContingencyBasisPoints: Int = 0
     var feeCalculatorSuggestedFeeCents: Int64 = 0
+    /// Itemized cost estimates (campsite, food, …) as JSON; see `EventCostEstimates`. The fixed/per-person
+    /// totals above are derived from these lines whenever the plan is saved.
+    var feeCalculatorEstimateLinesJSON: String = ""
     var closedAt: Date?
     var closeoutID: UUID?
     var notes: String = ""
