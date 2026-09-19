@@ -13,6 +13,10 @@ settings:
     CURRENT_PROJECT_VERSION: "25"
     CODE_SIGN_STYLE: Automatic
     ENABLE_USER_SCRIPT_SANDBOXING: YES
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
 targets:
   TroopLedger-iOS:
     type: application
@@ -26,6 +30,8 @@ targets:
     settings:
       base:
         PRODUCT_NAME: TroopLedger
+        DEVELOPMENT_TEAM: YYNDN9V2A4
+        MARKETING_VERSION: "1.1"
         PRODUCT_BUNDLE_IDENTIFIER: com.bettnet.TroopLedger
         CODE_SIGN_ENTITLEMENTS: Configuration/TroopLedger.entitlements
         GENERATE_INFOPLIST_FILE: NO
@@ -37,6 +43,8 @@ targets:
           # The starting-workbook snapshot holds real names and transactions; ship it only in Debug builds.
           EXCLUDED_SOURCE_FILE_NAMES: TroopFinanceImport.json
   TroopLedger-macOS:
+    dependencies:
+      - package: Sparkle
     type: application
     platform: macOS
     sources:
@@ -48,7 +56,10 @@ targets:
     settings:
       base:
         PRODUCT_NAME: TroopLedger
+        DEVELOPMENT_TEAM: YYNDN9V2A4
+        MARKETING_VERSION: "1.1"
         PRODUCT_BUNDLE_IDENTIFIER: com.bettnet.TroopLedger
+        CODE_SIGN_IDENTITY[sdk=macosx*]: Apple Development
         CODE_SIGN_ENTITLEMENTS: Configuration/TroopLedger-macOS.entitlements
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Configuration/TroopLedger-macOS-Info.plist

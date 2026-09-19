@@ -132,6 +132,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     case people = "People"
     case chargeBatches = "Charge Batches"
     case events = "Events"
+    case fundraisers = "Fundraisers"
     case reconcile = "Reconcile"
     case budget = "Budget"
     case reports = "Reports"
@@ -150,6 +151,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .people: "person.3.fill"
         case .chargeBatches: "person.2.badge.plus"
         case .events: "tent.2.fill"
+        case .fundraisers: "shippingbox.fill"
         case .reconcile: "checkmark.seal.fill"
         case .budget: "target"
         case .reports: "book.closed.fill"
@@ -165,7 +167,7 @@ enum AppSection: String, CaseIterable, Identifiable {
             .overview
         case .transactions, .deposits, .reimbursements:
             .money
-        case .people, .chargeBatches, .events:
+        case .people, .chargeBatches, .events, .fundraisers:
             .troop
         case .reconcile, .budget, .reports:
             .closeAndReport
@@ -266,6 +268,7 @@ struct RootView: View {
         case .people: PeopleListView()
         case .chargeBatches: RecurringChargeBatchListView()
         case .events: EventListView()
+        case .fundraisers: FundraiserListView()
         case .reconcile: ReconciliationView()
         case .budget: BudgetView()
         case .reports: ReportsView()

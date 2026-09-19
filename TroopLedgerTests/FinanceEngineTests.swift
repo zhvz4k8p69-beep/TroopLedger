@@ -12,6 +12,9 @@ final class FinanceEngineTests: XCTestCase {
         let context = ModelContext(container)
         let now = Date()
 
+        context.insert(FundraiserRecord(name: "Test"))
+        context.insert(FundraiserProductRecord(fundraiserID: UUID(), name: "Bar", unitName: "bar", unitCostCents: 50, unitPriceCents: 100))
+        context.insert(FundraiserActivityRecord(fundraiserID: UUID(), productID: UUID(), personID: nil, sellerName: "", kind: .receive, quantity: 1, amountCents: 50, date: now, notes: ""))
         context.insert(TroopProfileRecord())
         context.insert(AccountRecord(name: "Checking"))
         context.insert(LedgerCategoryRecord(name: "Dues", direction: .income))
@@ -471,6 +474,7 @@ final class FinanceEngineTests: XCTestCase {
             applicationVersion: "0.10.0-test"
         )
         let expectedTables: Set<String> = [
+            "fundraisers", "fundraiser_products", "fundraiser_activities",
             "troop_profile", "accounts", "ledger_categories", "operating_budgets", "budget_lines", "transactions", "deposit_batches", "deposit_allocations", "reimbursement_requests", "disbursement_control_settings", "reimbursement_attachments", "people", "member_ledger_entries", "registrations", "events",
             "event_fee_schedules", "event_participants", "event_closeouts", "event_closeout_allocations", "event_financial_entries", "cash_receipts", "reconciliations",
             "workbook_imports", "general_spreadsheet_imports", "scoutbook_imports", "calendar_subscriptions", "audit_log",

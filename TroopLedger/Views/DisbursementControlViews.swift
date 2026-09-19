@@ -13,6 +13,10 @@ struct PreferencesView: View {
                 .tabItem { Label("Controls", systemImage: "checkmark.shield") }
             AppearanceSettingsView(showsDismissButton: showsDismissButton)
                 .tabItem { Label("Appearance", systemImage: "paintpalette") }
+#if os(macOS)
+            SoftwareUpdateSettingsView()
+                .tabItem { Label("Updates", systemImage: "arrow.triangle.2.circlepath") }
+#endif
         }
 #if os(macOS)
         .frame(minWidth: 620, minHeight: 520)

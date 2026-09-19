@@ -250,6 +250,12 @@ struct PeopleListView: View {
 
     private func deletePerson(_ person: PersonRecord) {
         do {
+            let fundraiserRows = try modelContext.fetch(FetchDescriptor<FundraiserActivityRecord>())
+            guard !fundraiserRows.contains(where: { $0.personID == person.id }) else {
+                deletionMessage = "This person has fundraiser history. Mark them inactive instead."
+                pendingDeletion = nil
+                return
+            }
             AuditLogger.record(
                 .delete,
                 recordType: "Person",

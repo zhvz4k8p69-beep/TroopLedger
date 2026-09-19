@@ -2,6 +2,9 @@ import SwiftData
 
 enum ModelContainerFactory {
     static let modelTypes: [any PersistentModel.Type] = [
+        FundraiserRecord.self,
+        FundraiserProductRecord.self,
+        FundraiserActivityRecord.self,
         TroopProfileRecord.self,
         AccountRecord.self,
         LedgerCategoryRecord.self,

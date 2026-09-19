@@ -3,6 +3,9 @@ import SwiftData
 
 @main
 struct TroopLedgerApp: App {
+#if os(macOS)
+    @StateObject private var updates = SoftwareUpdateService.shared
+#endif
     private let storage = ModelContainerFactory.openCloudContainer()
 
     var body: some Scene {
@@ -12,6 +15,9 @@ struct TroopLedgerApp: App {
         }
         .commands {
             TroopLedgerCommands()
+            CommandGroup(after: .appInfo) {
+                CheckForSoftwareUpdatesButton(updates: updates)
+            }
         }
 
         Window("Preferences", id: "preferences") {

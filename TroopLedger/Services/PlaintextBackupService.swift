@@ -80,7 +80,7 @@ struct PlaintextBackupArchive {
 
 @MainActor
 enum PlaintextBackupService {
-    static let formatVersion = 11
+    static let formatVersion = 12
 
     static func defaultFilename(at date: Date = Date(), calendar: Calendar = .current) -> String {
         let components = calendar.dateComponents([.year, .month, .day], from: date)
@@ -125,6 +125,9 @@ enum PlaintextBackupService {
     }
 
     private static func makeTables(from context: ModelContext) throws -> [BackupTable] {
+        let fundraisers = try context.fetch(FetchDescriptor<FundraiserRecord>()).sortedByID()
+        let fundraiserProducts = try context.fetch(FetchDescriptor<FundraiserProductRecord>()).sortedByID()
+        let fundraiserActivities = try context.fetch(FetchDescriptor<FundraiserActivityRecord>()).sortedByID()
         let troopProfiles = try context.fetch(FetchDescriptor<TroopProfileRecord>()).sortedByID()
         let accounts = try context.fetch(FetchDescriptor<AccountRecord>()).sortedByID()
         let categories = try context.fetch(FetchDescriptor<LedgerCategoryRecord>()).sortedByID()
@@ -157,6 +160,15 @@ enum PlaintextBackupService {
         let auditEntries = try context.fetch(FetchDescriptor<AuditLogEntry>()).sortedByID()
 
         return [
+            BackupTable("fundraisers", columns: ["id", "name", "notes", "created_at", "is_archived"], rows: fundraisers.map {
+                [.uuid("id", $0.id), .string("name", $0.name), .string("notes", $0.notes), .date("created_at", $0.createdAt), .boolean("is_archived", $0.isArchived)]
+            }),
+            BackupTable("fundraiser_products", columns: ["id", "fundraiser_id", "name", "unit_name", "unit_cost_cents", "unit_price_cents"], rows: fundraiserProducts.map {
+                [.uuid("id", $0.id), .optionalUUID("fundraiser_id", $0.fundraiserID), .string("name", $0.name), .string("unit_name", $0.unitName), .integer("unit_cost_cents", $0.unitCostCents), .integer("unit_price_cents", $0.unitPriceCents)]
+            }),
+            BackupTable("fundraiser_activities", columns: ["id", "fundraiser_id", "product_id", "person_id", "seller_name", "kind", "quantity", "amount_cents", "date", "created_at", "notes", "voided_at", "void_reason"], rows: fundraiserActivities.map {
+                [.uuid("id", $0.id), .optionalUUID("fundraiser_id", $0.fundraiserID), .optionalUUID("product_id", $0.productID), .optionalUUID("person_id", $0.personID), .string("seller_name", $0.sellerName), .string("kind", $0.kindRaw), .integer("quantity", $0.quantity), .integer("amount_cents", $0.amountCents), .date("date", $0.date), .date("created_at", $0.createdAt), .string("notes", $0.notes), .optionalDate("voided_at", $0.voidedAt), .string("void_reason", $0.voidReason)]
+            }),
             BackupTable("troop_profile", columns: ["id", "troop_name", "troop_number", "council", "district", "chartered_organization", "address_line_1", "address_line_2", "city", "state_or_province", "postal_code", "country", "unit_email", "unit_phone", "website", "treasurer_name", "treasurer_preferred_name", "treasurer_title", "treasurer_email", "treasurer_phone", "committee_chair_name", "notes", "created_at", "modified_at"], rows: troopProfiles.map { profile in
                 [.uuid("id", profile.id), .string("troop_name", profile.troopName), .string("troop_number", profile.troopNumber), .string("council", profile.council), .string("district", profile.district), .string("chartered_organization", profile.charteredOrganization), .string("address_line_1", profile.addressLine1), .string("address_line_2", profile.addressLine2), .string("city", profile.city), .string("state_or_province", profile.stateOrProvince), .string("postal_code", profile.postalCode), .string("country", profile.country), .string("unit_email", profile.unitEmail), .string("unit_phone", profile.unitPhone), .string("website", profile.website), .string("treasurer_name", profile.treasurerName), .string("treasurer_preferred_name", profile.treasurerPreferredName), .string("treasurer_title", profile.treasurerTitle), .string("treasurer_email", profile.treasurerEmail), .string("treasurer_phone", profile.treasurerPhone), .string("committee_chair_name", profile.committeeChairName), .string("notes", profile.notes), .date("created_at", profile.createdAt), .date("modified_at", profile.modifiedAt)]
             }),

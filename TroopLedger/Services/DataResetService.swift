@@ -13,6 +13,9 @@ enum DataResetService {
     }
 
     static let supportedModelTypeNames: Set<String> = [
+        FundraiserRecord.self,
+        FundraiserProductRecord.self,
+        FundraiserActivityRecord.self,
         TroopProfileRecord.self,
         AccountRecord.self,
         LedgerCategoryRecord.self,
@@ -53,6 +56,9 @@ enum DataResetService {
         do {
             var deletedRecordCount = 0
 
+            deletedRecordCount += try deleteAll(FundraiserRecord.self, from: modelContext)
+            deletedRecordCount += try deleteAll(FundraiserProductRecord.self, from: modelContext)
+            deletedRecordCount += try deleteAll(FundraiserActivityRecord.self, from: modelContext)
             deletedRecordCount += try deleteAll(TroopProfileRecord.self, from: modelContext)
             deletedRecordCount += try deleteAll(AccountRecord.self, from: modelContext)
             deletedRecordCount += try deleteAll(LedgerCategoryRecord.self, from: modelContext)
@@ -141,7 +147,28 @@ enum DataIntegrityService {
         let participants = try context.fetch(FetchDescriptor<EventParticipant>())
         let registrations = try context.fetch(FetchDescriptor<RegistrationRecord>())
         let closeouts = try context.fetch(FetchDescriptor<EventCloseoutRecord>())
-        return check(accounts: accounts, transactions: transactions, people: people, events: events, requests: requests, entries: entries, batches: batches, allocations: allocations, participants: participants, registrations: registrations, closeouts: closeouts)
+        let fundraisers = try context.fetch(FetchDescriptor<FundraiserRecord>())
+        let products = try context.fetch(FetchDescriptor<FundraiserProductRecord>())
+        let activities = try context.fetch(FetchDescriptor<FundraiserActivityRecord>())
+        var fundraiserIssues: [DataIntegrityIssue] = []
+        let fundraiserIDs = Set(fundraisers.map(\.id))
+        let personIDs = Set(people.map(\.id))
+        for product in products {
+            if !fundraiserIDs.contains(product.fundraiserID ?? UUID()) {
+                fundraiserIssues.append(.init(severity: .problem, area: "Fundraisers", message: "\(product.name) has no fundraiser."))
+            }
+            do { try FundraiserService.validate(activities.filter { $0.productID == product.id }) }
+            catch { fundraiserIssues.append(.init(severity: .problem, area: "Fundraisers", message: "\(product.name): \(error.localizedDescription)")) }
+        }
+        for row in activities {
+            if !products.contains(where: { $0.id == row.productID && $0.fundraiserID == row.fundraiserID }) {
+                fundraiserIssues.append(.init(severity: .problem, area: "Fundraisers", message: "\(row.kindRaw) for \(row.sellerName) has a missing or mismatched product."))
+            }
+            if let personID = row.personID, !personIDs.contains(personID) {
+                fundraiserIssues.append(.init(severity: .warning, area: "Fundraisers", message: "\(row.sellerName) has fundraiser history but no People record."))
+            }
+        }
+        return check(accounts: accounts, transactions: transactions, people: people, events: events, requests: requests, entries: entries, batches: batches, allocations: allocations, participants: participants, registrations: registrations, closeouts: closeouts) + fundraiserIssues
     }
 
     nonisolated static func check(
