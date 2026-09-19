@@ -592,6 +592,113 @@ enum MemberEntryPolicy {
     }
 }
 
+/// What a member's balance is made of: totals by entry kind, the net still owed per charge source, and the
+/// balance after each entry, so the treasurer can see where a figure came from before adjusting it.
+struct MemberBalanceBreakdown: Equatable {
+    /// One charge source — an event when the entries name one, otherwise the ledger category.
+    struct Source: Identifiable, Equatable {
+        let id: String
+        let title: String
+        let eventID: UUID?
+        /// Charges and balance increases.
+        let chargedCents: Int64
+        /// Payments, credits, and balance decreases.
+        let settledCents: Int64
+        var netCents: Int64 { chargedCents - settledCents }
+    }
+
+    let chargedCents: Int64
+    let paidCents: Int64
+    let creditedCents: Int64
+    /// Signed: increases add, decreases subtract.
+    let adjustmentCents: Int64
+    let balanceCents: Int64
+    /// Sources still carrying a balance first (largest first), then the settled ones by name.
+    let sources: [Source]
+    /// The balance after each entry was applied, in date order.
+    let runningBalanceCents: [UUID: Int64]
+
+    static let adjustmentCategory = "Balance Adjustment"
+
+    static func build(entries: [MemberLedgerEntry], eventNames: [UUID: String]) -> MemberBalanceBreakdown {
+        var charged: Int64 = 0, paid: Int64 = 0, credited: Int64 = 0, adjustment: Int64 = 0
+        var chargedBySource: [String: Int64] = [:], settledBySource: [String: Int64] = [:]
+        var titles: [String: (String, UUID?)] = [:]
+        for entry in entries {
+            let amount = max(0, entry.amountCents)
+            switch entry.kind {
+            case .charge: charged += amount
+            case .payment: paid += amount
+            case .credit: credited += amount
+            case .adjustmentIncrease: adjustment += amount
+            case .adjustmentDecrease: adjustment -= amount
+            }
+            let key: String
+            if let eventID = entry.eventID {
+                key = "event:\(eventID.uuidString)"
+                titles[key] = (eventNames[eventID] ?? "Event (removed)", eventID)
+            } else {
+                let category = entry.category.trimmingCharacters(in: .whitespacesAndNewlines)
+                key = "category:\(category.lowercased())"
+                titles[key] = (category.isEmpty ? "Uncategorized" : category, nil)
+            }
+            if entry.kind.balanceMultiplier > 0 {
+                chargedBySource[key, default: 0] += amount
+            } else {
+                settledBySource[key, default: 0] += amount
+            }
+        }
+        let sources = titles.map { key, value in
+            Source(id: key, title: value.0, eventID: value.1, chargedCents: chargedBySource[key] ?? 0, settledCents: settledBySource[key] ?? 0)
+        }
+        .sorted { lhs, rhs in
+            if (lhs.netCents != 0) != (rhs.netCents != 0) { return lhs.netCents != 0 }
+            if lhs.netCents != rhs.netCents { return abs(lhs.netCents) > abs(rhs.netCents) }
+            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+        }
+        var running: [UUID: Int64] = [:]
+        var balance: Int64 = 0
+        // Same-day entries keep their creation order so the running figure matches how they were posted.
+        for entry in entries.sorted(by: { ($0.date, $0.createdAt) < ($1.date, $1.createdAt) }) {
+            balance += entry.balanceEffectCents
+            running[entry.id] = balance
+        }
+        return MemberBalanceBreakdown(
+            chargedCents: charged,
+            paidCents: paid,
+            creditedCents: credited,
+            adjustmentCents: adjustment,
+            balanceCents: charged - paid - credited + adjustment,
+            sources: sources,
+            runningBalanceCents: running
+        )
+    }
+}
+
+/// Moves a member's balance to a chosen figure (usually zero) with a single explained adjustment entry, so
+/// clearing a balance after an error or a committee decision leaves a trail instead of edited history.
+enum MemberBalanceAdjustment {
+    struct Plan: Equatable {
+        let kind: MemberEntryKind
+        let amountCents: Int64
+    }
+
+    /// The entry that takes `currentCents` to `targetCents`, or nil when nothing needs to change.
+    static func plan(currentCents: Int64, targetCents: Int64) -> Plan? {
+        let difference = targetCents.subtractingReportingOverflow(currentCents)
+        guard !difference.overflow, difference.partialValue != 0 else { return nil }
+        return Plan(kind: difference.partialValue > 0 ? .adjustmentIncrease : .adjustmentDecrease, amountCents: abs(difference.partialValue))
+    }
+
+    static func makeEntry(personID: UUID, plan: Plan, date: Date, reason: String) throws -> MemberLedgerEntry {
+        let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        try MemberEntryPolicy.validate(kind: plan.kind, amountCents: plan.amountCents, category: MemberBalanceBreakdown.adjustmentCategory, notes: trimmedReason)
+        let entry = MemberLedgerEntry(personID: personID, date: date, kind: plan.kind, amountCents: plan.amountCents, category: MemberBalanceBreakdown.adjustmentCategory)
+        entry.notes = trimmedReason
+        return entry
+    }
+}
+
 enum PersonValidationError: LocalizedError, Equatable {
     case nameRequired
     case duplicateMemberID(String)

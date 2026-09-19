@@ -3892,4 +3892,89 @@ final class FinanceEngineTests: XCTestCase {
         let position = FinanceEngine.cashPosition(accounts: [checking, cash], transactions: transactions)
         XCTAssertEqual(position.bankAndCashOnHandCents, 8_200)
     }
+
+    // MARK: - Member balance breakdown and adjustments
+
+    func testMemberBalanceBreakdownTotalsSourcesAndRunningBalance() {
+        let person = UUID(), camp = UUID()
+        let day: TimeInterval = 86_400
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let dues = MemberLedgerEntry(personID: person, date: base, kind: .charge, amountCents: 12_000, category: "Dues")
+        let campFee = MemberLedgerEntry(personID: person, date: base.addingTimeInterval(day), kind: .charge, amountCents: 25_000, category: "Event Fee")
+        campFee.eventID = camp
+        let campPayment = MemberLedgerEntry(personID: person, date: base.addingTimeInterval(2 * day), kind: .payment, amountCents: 10_000, category: "Event Fee")
+        campPayment.eventID = camp
+        let credit = MemberLedgerEntry(personID: person, date: base.addingTimeInterval(3 * day), kind: .credit, amountCents: 2_000, category: "Dues")
+        let writeOff = MemberLedgerEntry(personID: person, date: base.addingTimeInterval(4 * day), kind: .adjustmentDecrease, amountCents: 5_000, category: "Balance Adjustment")
+        let duesPayment = MemberLedgerEntry(personID: person, date: base.addingTimeInterval(5 * day), kind: .payment, amountCents: 10_000, category: "dues")
+
+        // Shuffled on purpose: the screen sorts newest first and the breakdown must not depend on input order.
+        let entries = [duesPayment, credit, dues, writeOff, campPayment, campFee]
+        let breakdown = MemberBalanceBreakdown.build(entries: entries, eventNames: [camp: "Summer Camp"])
+
+        XCTAssertEqual(breakdown.chargedCents, 37_000)
+        XCTAssertEqual(breakdown.paidCents, 20_000)
+        XCTAssertEqual(breakdown.creditedCents, 2_000)
+        XCTAssertEqual(breakdown.adjustmentCents, -5_000)
+        XCTAssertEqual(breakdown.balanceCents, 10_000)
+        XCTAssertEqual(breakdown.balanceCents, FinanceEngine.memberBalance(personID: person, entries: entries))
+
+        // Open balances list first, largest first; fully settled sources follow. Category names merge case-insensitively.
+        XCTAssertEqual(breakdown.sources.map(\.title), ["Summer Camp", "Balance Adjustment", "Dues"])
+        XCTAssertEqual(breakdown.sources[0].netCents, 15_000)
+        XCTAssertEqual(breakdown.sources[1].netCents, -5_000)
+        XCTAssertEqual(breakdown.sources[2].chargedCents, 12_000)
+        XCTAssertEqual(breakdown.sources[2].settledCents, 12_000)
+        XCTAssertEqual(breakdown.sources[2].netCents, 0)
+
+        XCTAssertEqual(breakdown.runningBalanceCents[dues.id], 12_000)
+        XCTAssertEqual(breakdown.runningBalanceCents[campFee.id], 37_000)
+        XCTAssertEqual(breakdown.runningBalanceCents[campPayment.id], 27_000)
+        XCTAssertEqual(breakdown.runningBalanceCents[credit.id], 25_000)
+        XCTAssertEqual(breakdown.runningBalanceCents[writeOff.id], 20_000)
+        XCTAssertEqual(breakdown.runningBalanceCents[duesPayment.id], 10_000)
+    }
+
+    func testMemberBalanceBreakdownNamesRemovedEventsAndEmptyCategories() {
+        let person = UUID()
+        let orphan = MemberLedgerEntry(personID: person, date: Date(), kind: .charge, amountCents: 100, category: "Fee")
+        orphan.eventID = UUID()
+        let blank = MemberLedgerEntry(personID: person, date: Date(), kind: .charge, amountCents: 50, category: "   ")
+        let breakdown = MemberBalanceBreakdown.build(entries: [orphan, blank], eventNames: [:])
+        XCTAssertEqual(Set(breakdown.sources.map(\.title)), ["Event (removed)", "Uncategorized"])
+        XCTAssertTrue(MemberBalanceBreakdown.build(entries: [], eventNames: [:]).sources.isEmpty)
+        XCTAssertEqual(MemberBalanceBreakdown.build(entries: [], eventNames: [:]).balanceCents, 0)
+    }
+
+    func testMemberBalanceAdjustmentPlansTheOffsettingEntry() throws {
+        XCTAssertEqual(
+            MemberBalanceAdjustment.plan(currentCents: 4_250, targetCents: 0),
+            MemberBalanceAdjustment.Plan(kind: .adjustmentDecrease, amountCents: 4_250)
+        )
+        XCTAssertEqual(
+            MemberBalanceAdjustment.plan(currentCents: -1_500, targetCents: 0),
+            MemberBalanceAdjustment.Plan(kind: .adjustmentIncrease, amountCents: 1_500)
+        )
+        XCTAssertEqual(
+            MemberBalanceAdjustment.plan(currentCents: 4_250, targetCents: -1_000),
+            MemberBalanceAdjustment.Plan(kind: .adjustmentDecrease, amountCents: 5_250)
+        )
+        XCTAssertNil(MemberBalanceAdjustment.plan(currentCents: 4_250, targetCents: 4_250), "Nothing to record when the balance already matches")
+        XCTAssertNil(MemberBalanceAdjustment.plan(currentCents: .min, targetCents: .max), "An impossible difference must not trap")
+
+        let person = UUID()
+        let plan = try XCTUnwrap(MemberBalanceAdjustment.plan(currentCents: 4_250, targetCents: 0))
+        XCTAssertThrowsError(try MemberBalanceAdjustment.makeEntry(personID: person, plan: plan, date: Date(), reason: "  ")) { error in
+            XCTAssertEqual(error as? MemberEntryValidationError, .adjustmentReasonRequired)
+        }
+        let entry = try MemberBalanceAdjustment.makeEntry(personID: person, plan: plan, date: Date(), reason: "  Committee waived 2025 dues  ")
+        XCTAssertEqual(entry.kind, .adjustmentDecrease)
+        XCTAssertEqual(entry.amountCents, 4_250)
+        XCTAssertEqual(entry.category, MemberBalanceBreakdown.adjustmentCategory)
+        XCTAssertEqual(entry.notes, "Committee waived 2025 dues")
+        XCTAssertEqual(entry.personID, person)
+        // Applying the planned entry lands exactly on the target.
+        let existing = MemberLedgerEntry(personID: person, date: Date(), kind: .charge, amountCents: 4_250, category: "Dues")
+        XCTAssertEqual(FinanceEngine.memberBalance(personID: person, entries: [existing, entry]), 0)
+    }
 }

@@ -293,6 +293,8 @@ struct PersonDetailView: View {
     @Query private var chargeAllocations: [RecurringChargeAllocationRecord]
     @State private var showingEdit = false
     @State private var showingEntry = false
+    @State private var showingBalanceAdjustment = false
+    @State private var showingBalanceSources = false
     @State private var showingRegistration = false
     @State private var editingRegistration: RegistrationRecord?
     @State private var pendingRegistrationDeletion: RegistrationRecord?
@@ -301,13 +303,18 @@ struct PersonDetailView: View {
     init(person: PersonRecord) {
         self.person = person
         let personID: UUID? = person.id
-        _entries = Query(filter: #Predicate<MemberLedgerEntry> { $0.personID == personID }, sort: \MemberLedgerEntry.date, order: .reverse)
+        // Same-day entries fall back to posting order so the rows read in the same sequence as their running balances.
+        _entries = Query(
+            filter: #Predicate<MemberLedgerEntry> { $0.personID == personID },
+            sort: [SortDescriptor(\MemberLedgerEntry.date, order: .reverse), SortDescriptor(\MemberLedgerEntry.createdAt, order: .reverse)]
+        )
         _registrations = Query(filter: #Predicate<RegistrationRecord> { $0.personID == personID }, sort: \RegistrationRecord.registeredOn, order: .reverse)
     }
 
     var body: some View {
         // Each ledger row used to search every event for its name.
         let eventNames = Dictionary(events.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        let breakdown = MemberBalanceBreakdown.build(entries: entries, eventNames: eventNames)
         return List {
             Section {
                 LabeledContent("Role", value: person.role.rawValue)
@@ -322,7 +329,38 @@ struct PersonDetailView: View {
                 }
                 if !person.patrol.isEmpty { LabeledContent("Patrol", value: person.patrol) }
                 if !person.scoutingMemberID.isEmpty { LabeledContent("Scouting Member ID", value: person.scoutingMemberID) }
-                LabeledContent("Member balance") { MoneyText(cents: FinanceEngine.memberBalance(personID: person.id, entries: entries), colorBySign: true) }
+            }
+
+            Section("Member Balance") {
+                LabeledContent("Balance") {
+                    MoneyText(cents: breakdown.balanceCents, colorBySign: true).fontWeight(.semibold)
+                }
+                if !entries.isEmpty {
+                    breakdownRow("Charges", cents: breakdown.chargedCents)
+                    breakdownRow("Payments", cents: -breakdown.paidCents)
+                    if breakdown.creditedCents != 0 { breakdownRow("Credits", cents: -breakdown.creditedCents) }
+                    if breakdown.adjustmentCents != 0 { breakdownRow("Adjustments", cents: breakdown.adjustmentCents) }
+                    DisclosureGroup("By event and category", isExpanded: $showingBalanceSources) {
+                        ForEach(breakdown.sources) { source in
+                            HStack(alignment: .firstTextBaseline) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Label(source.title, systemImage: source.eventID == nil ? "tag" : "calendar")
+                                    Text("\(Money.currency(cents: source.chargedCents)) charged • \(Money.currency(cents: source.settledCents)) paid or credited")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                MoneyText(cents: source.netCents, colorBySign: true)
+                            }
+                        }
+                    }
+                }
+                Text(breakdown.balanceCents > 0
+                    ? "A positive balance is money this member still owes the troop."
+                    : breakdown.balanceCents < 0 ? "A negative balance is credit the troop is holding for this member." : "Nothing is owed in either direction.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button("Adjust or Clear Balance", systemImage: "slider.horizontal.3") { showingBalanceAdjustment = true }
             }
 
             Section("Registration") {
@@ -365,9 +403,22 @@ struct PersonDetailView: View {
                                     .font(.caption2)
                                     .foregroundStyle(entry.accountTransactionID == nil ? Color.orange : Color.secondary)
                                 }
+                                if (entry.kind == .adjustmentIncrease || entry.kind == .adjustmentDecrease), !entry.notes.isEmpty {
+                                    Text(entry.notes)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                             Spacer()
-                            MoneyText(cents: entry.balanceEffectCents, colorBySign: true)
+                            VStack(alignment: .trailing, spacing: 3) {
+                                MoneyText(cents: entry.balanceEffectCents, colorBySign: true)
+                                if let running = breakdown.runningBalanceCents[entry.id] {
+                                    Text("Balance \(Money.currency(cents: running))")
+                                        .font(.caption2)
+                                        .monospacedDigit()
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                         }
                     }
                 }
@@ -387,6 +438,7 @@ struct PersonDetailView: View {
         }
         .sheet(isPresented: $showingEdit) { PersonFormView(person: person) }
         .sheet(isPresented: $showingEntry) { MemberEntryFormView(person: person) }
+        .sheet(isPresented: $showingBalanceAdjustment) { MemberBalanceAdjustmentView(person: person, currentBalanceCents: breakdown.balanceCents) }
         .sheet(isPresented: $showingRegistration) { RegistrationFormView(person: person) }
         .sheet(item: $editingRegistration) { RegistrationFormView(person: person, registration: $0) }
         .confirmationDialog(
@@ -403,6 +455,12 @@ struct PersonDetailView: View {
         .alert("Registration", isPresented: Binding(
             get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
         )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
+    }
+
+    private func breakdownRow(_ title: String, cents: Int64) -> some View {
+        LabeledContent(title) {
+            Text(Money.currency(cents: cents)).monospacedDigit().foregroundStyle(.secondary)
+        }
     }
 
     private func requestRegistrationDeletion(at offsets: IndexSet) {
@@ -805,6 +863,118 @@ struct MemberEntryFormView: View {
                     ("Event ID", record.eventID?.uuidString),
                     ("Linked bank transaction ID", record.accountTransactionID?.uuidString),
                     (isAdjustment ? "Adjustment reason" : "Notes", record.notes),
+                ]),
+                in: modelContext
+            )
+            try modelContext.save()
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+/// Brings a member's balance to a chosen figure — usually zero — with one explained adjustment entry. Used
+/// after an error is found or when the committee forgives or writes off what a family owes.
+struct MemberBalanceAdjustmentView: View {
+    enum Target: String, CaseIterable, Identifiable {
+        case clear = "Clear to zero"
+        case set = "Set to an amount"
+
+        var id: String { rawValue }
+    }
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    let person: PersonRecord
+    let currentBalanceCents: Int64
+    @State private var target = Target.clear
+    @State private var targetAmount = "0.00"
+    @State private var date = Date()
+    @State private var reason = ""
+    @State private var errorMessage: String?
+    @State private var isSaving = false
+
+    private var targetCents: Int64? {
+        switch target {
+        case .clear: 0
+        case .set: Money.cents(from: targetAmount)
+        }
+    }
+
+    private var plan: MemberBalanceAdjustment.Plan? {
+        targetCents.flatMap { MemberBalanceAdjustment.plan(currentCents: currentBalanceCents, targetCents: $0) }
+    }
+
+    var body: some View {
+        let plan = self.plan
+        return NavigationStack {
+            Form {
+                Section("Balance") {
+                    LabeledContent("Person", value: person.displayName)
+                    LabeledContent("Current balance") { MoneyText(cents: currentBalanceCents, colorBySign: true) }
+                    Picker("Change to", selection: $target) { ForEach(Target.allCases) { Text($0.rawValue).tag($0) } }
+                    if target == .set {
+                        AmountField(title: "New balance", text: $targetAmount, allowsNegative: true)
+                        Text("Enter what the member should owe. A negative amount leaves them with a credit.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    DatePicker("Date", selection: $date, displayedComponents: .date)
+                }
+                Section("Result") {
+                    if let plan {
+                        LabeledContent("Entry", value: "\(plan.kind.rawValue) of \(Money.currency(cents: plan.amountCents))")
+                        LabeledContent("New balance") { MoneyText(cents: targetCents ?? 0, colorBySign: true) }
+                    } else if targetCents == nil {
+                        Text("Enter a valid amount.").foregroundStyle(.secondary)
+                    } else {
+                        Text("The balance is already \(Money.currency(cents: currentBalanceCents)). Nothing to record.").foregroundStyle(.secondary)
+                    }
+                }
+                Section("Reason") {
+                    TextField("Required explanation", text: $reason, axis: .vertical)
+                    Text("This records a balance adjustment, not a payment: no money changes hands. The reason is kept with the entry, shown on family statements, and written to the audit log.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("Adjust Balance")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Record Adjustment", action: save).disabled(!canSave || isSaving) }
+            }
+        }
+        .frame(minWidth: 450, minHeight: 540)
+        .alert("Adjust Balance", isPresented: Binding(
+            get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
+        )) { Button("OK") { errorMessage = nil } } message: { Text(errorMessage ?? "") }
+    }
+
+    private var canSave: Bool {
+        plan != nil && !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func save() {
+        guard !isSaving, let plan, let targetCents else { return }
+        isSaving = true
+        defer { if errorMessage != nil { isSaving = false } }
+        do {
+            let entry = try MemberBalanceAdjustment.makeEntry(personID: person.id, plan: plan, date: date, reason: reason)
+            modelContext.insert(entry)
+            AuditLogger.record(
+                .create,
+                recordType: "Member Ledger Entry",
+                recordID: entry.id,
+                summary: "\(target == .clear ? "Cleared" : "Adjusted") balance for \(person.displayName)",
+                details: AuditLogger.details([
+                    ("Person ID", person.id.uuidString),
+                    ("Date", entry.date.formatted(date: .numeric, time: .omitted)),
+                    ("Balance before", Money.currency(cents: currentBalanceCents)),
+                    ("Balance after", Money.currency(cents: targetCents)),
+                    ("Entry", "\(entry.kind.rawValue) of \(Money.currency(cents: entry.amountCents))"),
+                    ("Adjustment reason", entry.notes),
                 ]),
                 in: modelContext
             )
