@@ -146,12 +146,25 @@ private struct MacPageToolbar<Actions: View>: View {
 }
 
 extension View {
+#if os(macOS)
+    /// Stacks the page toolbar above the content instead of using `safeAreaInset(edge: .top)`. With the inset,
+    /// a `List` extended under the toolbar and its section-header cells were sometimes measured while sitting
+    /// in that top safe area, so the first pinned header came out taller by the inset (~65pt of blank space
+    /// between the header and its first row on pushed screens). Keeping the toolbar out of the list's safe
+    /// area removes the miscalculation. The content is proposed the full remaining area so short, non-scrolling
+    /// pages lay out exactly as they did under the inset.
+    private func macPage<Toolbar: View>(@ViewBuilder toolbar: () -> Toolbar) -> some View {
+        VStack(spacing: 0) {
+            toolbar()
+            frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+#endif
+
     @ViewBuilder
     func pageToolbar<Actions: View>(title: String, @ViewBuilder actions: () -> Actions) -> some View {
 #if os(macOS)
-        safeAreaInset(edge: .top, spacing: 0) {
-            MacPageToolbar(title: title, actions: actions)
-        }
+        macPage { MacPageToolbar(title: title, actions: actions) }
 #else
         navigationTitle(title)
             .toolbar {
@@ -165,9 +178,7 @@ extension View {
     @ViewBuilder
     func pageHeader(title: String) -> some View {
 #if os(macOS)
-        safeAreaInset(edge: .top, spacing: 0) {
-            MacPageToolbar(title: title) { EmptyView() }
-        }
+        macPage { MacPageToolbar(title: title) { EmptyView() } }
 #else
         navigationTitle(title)
 #endif
