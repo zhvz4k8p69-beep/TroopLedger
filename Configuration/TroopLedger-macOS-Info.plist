@@ -21,7 +21,7 @@
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>SUFeedURL</key>
-	<string>https://github.com/zhvz4k8p69-beep/TroopLedger/releases/download/updates/appcast.xml</string>
+	<string>https://github.com/zhvz4k8p69-beep/mac-updates/releases/download/updates/TroopLedger-appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>R9Pmd/6jysFIGoTZmVlSJQyxC5DGEkBT1sViNba1ajU=</string>
 	<key>SUEnableInstallerLauncherService</key>

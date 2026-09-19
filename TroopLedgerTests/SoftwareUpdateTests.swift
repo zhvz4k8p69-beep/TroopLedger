@@ -10,7 +10,7 @@ final class SoftwareUpdateTests: XCTestCase {
     func testBuiltApplicationHasPermanentFeedAndVerificationKey() {
         let builtInfo = Bundle.main.infoDictionary ?? [:]
         XCTAssertEqual(builtInfo["SUFeedURL"] as? String,
-            "https://github.com/zhvz4k8p69-beep/TroopLedger/releases/download/updates/appcast.xml")
+            "https://github.com/zhvz4k8p69-beep/mac-updates/releases/download/updates/TroopLedger-appcast.xml")
         XCTAssertNil(SoftwareUpdateService.configurationIssue(info: builtInfo))
         XCTAssertEqual(builtInfo["SUEnableInstallerLauncherService"] as? Bool, true)
     }

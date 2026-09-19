@@ -9,3 +9,4 @@ tmp/
 
 # Real troop names and transactions; kept local only (Debug-build resource).
 TroopLedger/Resources/TroopFinanceImport.json
+dist/

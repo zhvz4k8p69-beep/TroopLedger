@@ -4,57 +4,42 @@ The macOS target embeds Sparkle 2.10.0 through Swift Package Manager. The iOS ta
 
 ## Update host
 
-`SUFeedURL` in `Configuration/TroopLedger-macOS-Info.plist` points to:
+`SUFeedURL` in `Configuration/TroopLedger-macOS-Info.plist` points to the shared public feed repo used by all of Dom's Mac apps:
 
-https://github.com/zhvz4k8p69-beep/TroopLedger/releases/download/updates/appcast.xml
+https://github.com/zhvz4k8p69-beep/mac-updates/releases/download/updates/TroopLedger-appcast.xml
 
-The repository is public. Its permanent `updates` release hosts the feed; signed app archives belong in immutable versioned releases. `Updates/appcast.xml` is the initial empty feed, so update checks succeed but offer no download until the first signed release is added. Never overwrite an established feed with this bootstrap copy.
-
-Each appcast enclosure must reference a particular version's release asset, never `latest`. No GitHub credentials are embedded in the app or feed.
+The permanent `updates` release there hosts each app's feed asset; signed app archives live in immutable releases tagged `TroopLedger-v<marketing>-<build>`. Enclosures always reference a particular version's release asset, never `latest`. No GitHub credentials are embedded in the app or feed. Never rename or move the feed asset — every installed copy has this URL baked in.
 
 ## Signing key
 
-A dedicated Ed25519 key was generated in the macOS Keychain under account `com.bettnet.TroopLedger` using Sparkle's `generate_keys`. Only the public key is stored in `SUPublicEDKey`. Future release signing must use this same Keychain account. Securely back up the private key using Sparkle's documented key export procedure to an encrypted location outside this repository. Losing it complicates updating installed copies; do not regenerate or replace it casually.
+A dedicated Ed25519 key lives in the macOS login Keychain under service `https://sparkle-project.org`, account `com.bettnet.TroopLedger` (Sparkle's `generate_keys --account com.bettnet.TroopLedger`). Only the public key is stored in `SUPublicEDKey`. All release signing must use this same Keychain account; the private key is backed up in 1Password. Losing it means installed copies can never verify another update, so do not regenerate or replace it.
 
-Sparkle's tools live in the build directory at:
+Sparkle's tools live in the build directory at `SourcePackages/artifacts/sparkle/Sparkle/bin/`; the scripts find them automatically.
 
-```
-SourcePackages/artifacts/sparkle/Sparkle/bin/
-```
+## Shipping a release
 
-The SPM version is pinned in `project.yml` and `Package.resolved`. The YAML now records the existing app target marketing version (1.1) and development team so regeneration preserves them.
-
-## Preparing a release
-
-1. Keep the permanent feed URL unchanged. Increase `CURRENT_PROJECT_VERSION` for every update; Sparkle compares build versions, not just marketing versions. The current build number is 25.
-2. Archive **TroopLedger-macOS** in Release with both Apple Silicon and Intel architectures. Use Xcode Organizer's Developer ID export/notarization workflow, then staple the notarization ticket. Standard archive/export signing handles Sparkle's nested helpers. Keep CloudKit and existing file-picker entitlements.
-3. Pass the exported, notarized `.app` to the preparation script. Use a new output directory and the immutable URL prefix for that version's public release:
-
-```sh
-Scripts/prepare-sparkle-update.sh \
-  '/path/to/export/TroopLedger.app' \
-  '/path/to/new-release-output' \
-  'https://github.com/zhvz4k8p69-beep/TroopLedger/releases/download/vVERSION/' \
-  '/path/to/DerivedData/SourcePackages/artifacts/sparkle/Sparkle/bin'
-```
-
-The script verifies the app signature, Gatekeeper acceptance, stapled ticket, universal architectures, matching signing key, and embedded Sparkle. It prepares a ZIP, signed appcast, and checksum file locally. It never uploads, notarizes, installs, or publishes anything. Its generated feed contains the prepared version only and no delta updates.
-
-4. Review the generated XML and archive. Upload the ZIP to its immutable versioned release, confirm it downloads without signing into GitHub, then replace the feed asset in the `updates` release:
+1. Bump `CURRENT_PROJECT_VERSION` in **both** `project.yml` and `TroopLedger.xcodeproj/project.pbxproj` (the checked-in pbxproj is authoritative; XcodeGen regeneration is safe but not automatic). Sparkle compares build numbers, not marketing versions. Commit.
+2. Build, sign, notarize, and staple a universal (arm64 + x86_64) Developer ID app:
 
    ```sh
-   gh release upload updates /path/to/new-release-output/appcast.xml \
-     --repo zhvz4k8p69-beep/TroopLedger --clobber
+   ./Scripts/release-mac.sh            # add --install to also replace /Applications/TroopLedger.app
    ```
 
-   This upload publishes the update to installed clients. Publish the archive before changing the feed. Do not rename an asset after generating the appcast. If maintaining older OS branches, merge their existing entries using Sparkle's appcast workflow rather than replacing a multi-branch feed with this one-version feed.
-5. Test from an older **signed, installed, Sparkle-enabled** copy: check for updates, verify the version/notes, install, relaunch, and verify the app's troop records. Test automatic checks as well. An unsigned unit-test build does not prove installer or production feed behavior.
+   The script refuses a build without Hardened Runtime, the sandbox/CloudKit/Sparkle entitlements, both architectures, the permanent feed URL, a 32-byte public key, or with the starting-workbook snapshot inside the bundle. It uses the `TroopLedger` notarytool Keychain profile, falling back to `BettWatch` (same team).
+3. Package, sign the appcast entry, and publish:
 
-Existing copies without Sparkle require one manual upgrade to the first Sparkle-enabled release.
+   ```sh
+   ./Scripts/prepare-sparkle-update.sh --publish
+   ```
+
+   Without `--publish` it only prepares `dist/sparkle/<tag>/` for review. With it, the script creates the versioned release in `mac-updates`, waits until the zip downloads anonymously, and only then replaces `TroopLedger-appcast.xml` in the `updates` release — the moment installed copies start seeing the update. The new feed is merged with the live one so earlier releases stay listed.
+4. Test from an older **signed, installed, Sparkle-enabled** copy: check for updates, verify the version, install, relaunch, and verify the troop records. An unsigned unit-test build does not prove installer or production feed behavior.
+
+Existing copies without Sparkle require one manual upgrade to the first Sparkle-enabled release (1.1 build 26).
 
 ## Sandbox and development
 
-The app keeps network client access and enables Sparkle's Installer XPC service with `SUEnableInstallerLauncherService`. The entitlement list grants the two bundle-specific Sparkle Mach service names. The extra Downloader XPC service is not enabled because the app already has network access. Keep Hardened Runtime and library validation enabled for distribution. Use Apple Development signing to launch local builds with Sparkle; do not disable library validation for release builds.
+The app keeps network client access and enables Sparkle's Installer XPC service with `SUEnableInstallerLauncherService`. The entitlement list grants the two bundle-specific Sparkle Mach service names (`com.bettnet.TroopLedger-spks` / `-spki`). The extra Downloader XPC service is not enabled because the app already has network access. Keep Hardened Runtime and library validation enabled for distribution. Use Apple Development signing to launch local builds with Sparkle; do not disable library validation for release builds.
 
 The updater skips startup inside XCTest and refuses invalid/missing feed or verification-key configuration. Its preferences tab explains a configuration failure instead of contacting a placeholder server.
 
