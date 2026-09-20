@@ -1,0 +1,5 @@
+# Install with: /opt/homebrew/bin/python3 -m pip install -r mcp/requirements.txt
+mcp>=1.0,<2
+# Optional — only for the read_statement_pdf tool. Claude can read PDFs directly
+# (Read tool / DEVONthink get_record_text), so this is a convenience.
+# pypdf>=4

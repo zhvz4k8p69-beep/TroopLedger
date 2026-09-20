@@ -10,12 +10,14 @@
 		00788A6A3B944A4882C5F9D5 /* BatchDepositService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1568DD3FEA5C19099242ED50 /* BatchDepositService.swift */; };
 		065B1A8FAF04566552A3A835 /* TroopLedgerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CB15E851EA7C9F563B6106C /* TroopLedgerApp.swift */; };
 		093677EFEA6B27C6CF412C23 /* ReimbursementApprovalReportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEC7A24C923C99BCA464ED5C /* ReimbursementApprovalReportService.swift */; };
+		5A4F41E8E6674D2E33C92B0F /* ReconciliationPlanService.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBFEC9F2C4BEE33A719A19E0 /* ReconciliationPlanService.swift */; };
 		0A4041878271A0E95F125FB7 /* PeopleViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3CB20484E8B988DDA7B836D /* PeopleViews.swift */; };
 		0A8D315797D9A0F2B7465397 /* FundraiserViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2418ABB5A995482B96432E57 /* FundraiserViews.swift */; };
 		0E1CDE1DCE6D5DBB1786CA90 /* ReimbursementViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4478E1AAF0138F436C6D56A2 /* ReimbursementViews.swift */; };
 		0F9E7F32E66BD7C9BC45C056 /* FundraiserService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65E76DC3B5A8882931894240 /* FundraiserService.swift */; };
 		156C6E5D5D29918B48070265 /* DisbursementControlViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B1591690D1C958D6470578D /* DisbursementControlViews.swift */; };
 		170B8777FD7278B08F40D6EC /* ReimbursementApprovalReportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEC7A24C923C99BCA464ED5C /* ReimbursementApprovalReportService.swift */; };
+		5C5217EBE3D69AC3F4820829 /* ReconciliationPlanService.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBFEC9F2C4BEE33A719A19E0 /* ReconciliationPlanService.swift */; };
 		176AB25318C9E73FAFCC81C8 /* SpreadsheetImportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7E50B5AC271A414CEDA437 /* SpreadsheetImportView.swift */; };
 		1A6BF72128643422C3886FFE /* AuditLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FDDBFB04B1809D5053E2962 /* AuditLogView.swift */; };
 		1C6BBC28B339FD9627FC8808 /* ScoutbookIntegrationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36FA50134121AB82E21A3E87 /* ScoutbookIntegrationView.swift */; };
@@ -75,6 +77,7 @@
 		9E1AEFAAE1FEF2B981B329A3 /* EventRosterService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02268E6E965929602734901F /* EventRosterService.swift */; };
 		9F882D985FEAB744C09E7E9F /* UndepositedFundsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B180D686A1721B40B8A00A94 /* UndepositedFundsService.swift */; };
 		9FDB501B0F5A8B0CBAF642E4 /* FundraiserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C95F3D5C30EB29A3FE6EBE6 /* FundraiserTests.swift */; };
+		142B4D9B1D79F4D9B9C356AF /* ReconciliationPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DE0BA8476BEF57D3A642A2C /* ReconciliationPlanTests.swift */; };
 		9FFFE6BA396008B9DBF9E780 /* PlaintextBackupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A78AE42872A7598B6FEC6CA /* PlaintextBackupService.swift */; };
 		A1E9ABD12DD6B996EB033B2F /* SpreadsheetImportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7E50B5AC271A414CEDA437 /* SpreadsheetImportView.swift */; };
 		A2AAD0A2FEEB8AC4A164F366 /* LedgerModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14B95027EC3A850373612406 /* LedgerModels.swift */; };
@@ -168,6 +171,7 @@
 		823FC6B60C1B1EDE9929FBA7 /* EventFinancialCompletionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventFinancialCompletionService.swift; sourceTree = "<group>"; };
 		84214DBF950CE769F5C24A71 /* ReportsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReportsView.swift; sourceTree = "<group>"; };
 		8C95F3D5C30EB29A3FE6EBE6 /* FundraiserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FundraiserTests.swift; sourceTree = "<group>"; };
+		9DE0BA8476BEF57D3A642A2C /* ReconciliationPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReconciliationPlanTests.swift; sourceTree = "<group>"; };
 		9B1591690D1C958D6470578D /* DisbursementControlViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisbursementControlViews.swift; sourceTree = "<group>"; };
 		9B72F4456D82C771A5011744 /* FinanceEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinanceEngine.swift; sourceTree = "<group>"; };
 		9BAF57DAF5B4C70BAC68BEF8 /* FundraiserModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FundraiserModels.swift; sourceTree = "<group>"; };
@@ -194,6 +198,7 @@
 		E775B530096AD22BE583097B /* RecurringChargeBatchService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecurringChargeBatchService.swift; sourceTree = "<group>"; };
 		EC4C20937573F9C74DE475DC /* TroopLedgerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TroopLedgerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		EEC7A24C923C99BCA464ED5C /* ReimbursementApprovalReportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReimbursementApprovalReportService.swift; sourceTree = "<group>"; };
+		EBFEC9F2C4BEE33A719A19E0 /* ReconciliationPlanService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReconciliationPlanService.swift; sourceTree = "<group>"; };
 		EFB939E965FA14B525CE0B2E /* SoftwareUpdateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftwareUpdateTests.swift; sourceTree = "<group>"; };
 		F89D0C971AA4D04BB9CD3CBC /* ModelContainerFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelContainerFactory.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -246,6 +251,7 @@
 				1A78AE42872A7598B6FEC6CA /* PlaintextBackupService.swift */,
 				E775B530096AD22BE583097B /* RecurringChargeBatchService.swift */,
 				EEC7A24C923C99BCA464ED5C /* ReimbursementApprovalReportService.swift */,
+				EBFEC9F2C4BEE33A719A19E0 /* ReconciliationPlanService.swift */,
 				A8253506B9C016925F9081BE /* ReimbursementService.swift */,
 				B8FE52BF25C11116DB12779F /* ScoutbookCalendarService.swift */,
 				090F0FDBE9105DFAB9E0D962 /* ScoutbookImporter.swift */,
@@ -262,6 +268,7 @@
 			children = (
 				2B830E64ABA834C4C3C77314 /* FinanceEngineTests.swift */,
 				8C95F3D5C30EB29A3FE6EBE6 /* FundraiserTests.swift */,
+				9DE0BA8476BEF57D3A642A2C /* ReconciliationPlanTests.swift */,
 				EFB939E965FA14B525CE0B2E /* SoftwareUpdateTests.swift */,
 				E72C680AA755BED71642CA50 /* TenthRoundServiceTests.swift */,
 				A19B8DEEFC492CE84CD58AF0 /* TenthRoundViewTests.swift */,
@@ -465,6 +472,7 @@
 			files = (
 				B285E02BE329F4DB12A12AF3 /* FinanceEngineTests.swift in Sources */,
 				9FDB501B0F5A8B0CBAF642E4 /* FundraiserTests.swift in Sources */,
+				142B4D9B1D79F4D9B9C356AF /* ReconciliationPlanTests.swift in Sources */,
 				F7FED79AEA9B9AAABB7B777E /* SoftwareUpdateTests.swift in Sources */,
 				617D13CF4E293351D3FE72B2 /* TenthRoundServiceTests.swift in Sources */,
 				3815C1D2C2A350A077A6D161 /* TenthRoundViewTests.swift in Sources */,
@@ -509,6 +517,7 @@
 				6478B0E36EBACAC03ACAF0B5 /* RecurringChargeBatchService.swift in Sources */,
 				27F886E4C2DC685303198F32 /* RecurringChargeBatchViews.swift in Sources */,
 				170B8777FD7278B08F40D6EC /* ReimbursementApprovalReportService.swift in Sources */,
+				5C5217EBE3D69AC3F4820829 /* ReconciliationPlanService.swift in Sources */,
 				BD7AD258291C3186E821ACA9 /* ReimbursementApprovalReportView.swift in Sources */,
 				F01DD9B65FB6D9377F7378C3 /* ReimbursementService.swift in Sources */,
 				0E1CDE1DCE6D5DBB1786CA90 /* ReimbursementViews.swift in Sources */,
@@ -568,6 +577,7 @@
 				37FD30EB9356D952020C3F51 /* RecurringChargeBatchService.swift in Sources */,
 				D1FC0A6A609B28BAC4DC1069 /* RecurringChargeBatchViews.swift in Sources */,
 				093677EFEA6B27C6CF412C23 /* ReimbursementApprovalReportService.swift in Sources */,
+				5A4F41E8E6674D2E33C92B0F /* ReconciliationPlanService.swift in Sources */,
 				655B3903EC6CF50E45DAF6B8 /* ReimbursementApprovalReportView.swift in Sources */,
 				E09B4BF006A6C7210F0202DC /* ReimbursementService.swift in Sources */,
 				CE6FD0268250192D6140E73C /* ReimbursementViews.swift in Sources */,

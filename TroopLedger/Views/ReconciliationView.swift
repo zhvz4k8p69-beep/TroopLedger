@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
 
 struct ReconciliationView: View {
     @Environment(\.modelContext) private var modelContext
@@ -13,6 +14,8 @@ struct ReconciliationView: View {
     @State private var notes = ""
     @State private var errorMessage: String?
     @State private var showingReconciliationMilestone = false
+    @State private var showingPlanImporter = false
+    @State private var planPreview: ReconciliationPlanPreview?
 
     private var account: AccountRecord? { accounts.first { $0.id == accountID } }
     private var eligible: [LedgerTransaction] {
@@ -49,8 +52,14 @@ struct ReconciliationView: View {
         let difference = statementCents.map { $0 - clearedBalance }
         return content(eligible: eligible, clearedBalance: clearedBalance, difference: difference)
         .pageToolbar(title: "Reconcile") {
+            Button("Import Plan…", systemImage: "square.and.arrow.down") { showingPlanImporter = true }
+                .disabled(accounts.isEmpty)
             Button("Finish Reconciliation", systemImage: "checkmark.seal", action: finish)
                 .disabled(account == nil || statementCents == nil || difference != 0 || !statementDateIsAfterLock || statementDateIsInFuture)
+        }
+        .fileImporter(isPresented: $showingPlanImporter, allowedContentTypes: [.json], onCompletion: handlePlanFile)
+        .sheet(item: $planPreview) { preview in
+            ReconciliationPlanImportView(preview: preview, onApplied: didComplete)
         }
         .onAppear {
             if accountID == nil { accountID = AccountSelectionPolicy.defaultOperatingAccount(in: accounts)?.id }
@@ -219,56 +228,164 @@ struct ReconciliationView: View {
 
     private func finish() {
         do {
-            guard let statementCents else { throw ReconciliationCompletionError.outOfBalance }
-            try ReconciliationCompletionPolicy.validate(
+            guard let account, let statementCents else { throw ReconciliationCompletionError.outOfBalance }
+            let record = try ReconciliationCompletionService.complete(
                 account: account,
                 statementDate: statementDate,
                 statementBalanceCents: statementCents,
-                clearedBalanceCents: clearedBalance,
                 selectedTransactionIDs: selected,
+                notes: notes,
                 transactions: transactions,
-                reconciliations: reconciliations
+                reconciliations: reconciliations,
+                in: modelContext
             )
-            let record = ReconciliationRecord(accountID: account?.id, statementDate: statementDate, statementEndingBalanceCents: statementCents, clearedBalanceCents: clearedBalance)
-            record.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
-            modelContext.insert(record)
-            var clearedDescriptions: [String] = []
-            for transaction in transactions where selected.contains(transaction.id) {
-                transaction.isCleared = true
-                transaction.reconciledAt = Date()
-                transaction.reconciliationID = record.id
-                clearedDescriptions.append("\(transaction.id.uuidString.lowercased()) \(transaction.date.formatted(date: .numeric, time: .omitted)) \(Money.currency(cents: transaction.signedAmountCents))")
+            didComplete(record)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func didComplete(_ record: ReconciliationRecord) {
+        accountID = record.accountID
+        selected.removeAll()
+        notes = ""
+        endingBalance = "0.00"
+        statementDate = Self.nextStatementDate(after: record.statementDate)
+        showingReconciliationMilestone = true
+    }
+
+    // MARK: - Plan import
+
+    private func handlePlanFile(_ result: Result<URL, Error>) {
+        do {
+            let url = try result.get()
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            let data = try ImportedFileReader.read(url, maximumBytes: ReconciliationPlanImporter.maximumFileBytes, tooLargeError: ReconciliationPlanError.fileTooLarge)
+            let plan = try ReconciliationPlanImporter.decode(data)
+            planPreview = try ReconciliationPlanImporter.preview(plan, accounts: accounts, transactions: transactions, reconciliations: reconciliations)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+/// Review of a plan written by the `troopledger` MCP server before it is applied. Every ID in the plan was checked
+/// against the live ledger when the preview was built; problems block applying, warnings do not.
+struct ReconciliationPlanImportView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    @Query(sort: \LedgerTransaction.date) private var transactions: [LedgerTransaction]
+    @Query(sort: \ReconciliationRecord.statementDate, order: .reverse) private var reconciliations: [ReconciliationRecord]
+    let preview: ReconciliationPlanPreview
+    let onApplied: (ReconciliationRecord) -> Void
+    @State private var errorMessage: String?
+    @State private var isApplying = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                summarySection
+                if !preview.problems.isEmpty {
+                    Section("Problems") {
+                        ForEach(preview.problems, id: \.self) { problem in
+                            Label(problem, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+                        }
+                    }
+                }
+                if !preview.warnings.isEmpty {
+                    Section("Check before applying") {
+                        ForEach(preview.warnings, id: \.self) { warning in
+                            Label(warning, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        }
+                    }
+                }
+                if !preview.additions.isEmpty {
+                    Section("Transactions to add (\(preview.additions.count))") {
+                        ForEach(preview.additions) { item in
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(item.payee.isEmpty ? item.category : item.payee)
+                                    Text("\(item.date.formatted(date: .abbreviated, time: .omitted)) · \(item.category)\(item.adjustsTransactionID == nil ? "" : " · adjustment")\(item.memo.isEmpty ? "" : " · \(item.memo)")")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                MoneyText(cents: item.signedAmountCents, colorBySign: true)
+                            }
+                        }
+                    }
+                }
+                Section("Transactions to clear (\(preview.clearItems.count))") {
+                    if preview.clearItems.isEmpty {
+                        Text("None.").foregroundStyle(.secondary)
+                    }
+                    ForEach(preview.clearItems) { item in
+                        HStack {
+                            Image(systemName: item.isTentative ? "questionmark.square" : "checkmark.square")
+                                .foregroundStyle(item.isTentative ? Color.orange : Color.accentColor)
+                            VStack(alignment: .leading) {
+                                Text(item.transaction.payee.isEmpty ? item.transaction.category : item.transaction.payee)
+                                Text("\(item.transaction.date.formatted(date: .abbreviated, time: .omitted))\(item.transaction.checkNumber.isEmpty ? "" : " · #\(item.transaction.checkNumber)")")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            MoneyText(cents: item.transaction.signedAmountCents, colorBySign: true)
+                        }
+                    }
+                }
             }
-            let accountLabel = account?.name ?? "account"
-            AuditLogger.record(
-                .reconcile,
-                recordType: "Reconciliation",
-                recordID: record.id,
-                summary: "Reconciled \(accountLabel) through \(statementDate.formatted(date: .long, time: .omitted))",
-                details: AuditLogger.details([
-                    ("Statement ending balance", Money.currency(cents: record.statementEndingBalanceCents)),
-                    ("Cleared balance", Money.currency(cents: record.clearedBalanceCents)),
-                    ("Transactions cleared", String(selected.count)),
-                    // An auditor needs to know which items this reconciliation cleared, not only how many.
-                    ("Cleared items", clearedDescriptions.sorted().joined(separator: "\n")),
-                    ("Notes", record.notes),
-                ]),
-                in: modelContext
-            )
-            AuditLogger.record(
-                .lockPeriod,
-                recordType: "Account",
-                recordID: account?.id,
-                summary: "Locked \(accountLabel) through \(statementDate.formatted(date: .long, time: .omitted))",
-                details: "Established by reconciliation \(record.id.uuidString)",
-                in: modelContext
-            )
-            try modelContext.save()
-            selected.removeAll()
-            notes = ""
-            endingBalance = "0.00"
-            statementDate = Self.nextStatementDate(after: statementDate)
-            showingReconciliationMilestone = true
+            .navigationTitle("Import Reconciliation Plan")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Apply Plan", action: apply).disabled(!preview.canApply || isApplying)
+                }
+            }
+        }
+        .frame(minWidth: 560, minHeight: 560)
+        .alert("Reconciliation Plan", isPresented: Binding(
+            get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("OK") { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "")
+        }
+    }
+
+    private var summarySection: some View {
+        Section("Statement") {
+            LabeledContent("Account", value: preview.account.name)
+            LabeledContent("Statement ending date", value: preview.statementDate.formatted(date: .long, time: .omitted))
+            LabeledContent("Statement ending balance") { MoneyText(cents: preview.plan.statementEndingBalanceCents) }
+            LabeledContent("Ledger cleared balance before") { MoneyText(cents: preview.clearedBeforeCents) }
+            LabeledContent("Items to clear (\(preview.clearItems.count))") { MoneyText(cents: preview.clearNetCents, colorBySign: true) }
+            LabeledContent("Transactions to add (\(preview.additions.count))") { MoneyText(cents: preview.additionsNetCents, colorBySign: true) }
+            LabeledContent("Ledger cleared balance after") { MoneyText(cents: preview.clearedAfterCents) }
+            LabeledContent("Difference") { MoneyText(cents: preview.differenceCents, colorBySign: true) }
+            if preview.canApply {
+                Label("Ties to the statement. Applying will add the transactions, clear the items, and lock the period.", systemImage: "checkmark.seal.fill")
+                    .font(.caption)
+                    .foregroundStyle(Color.fieldbookPositive)
+            } else if preview.problems.isEmpty {
+                Label("The difference must be $0.00 before the plan can be applied.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if let generated = preview.plan.generatedAt, !generated.isEmpty {
+                Text("Plan written \(generated)").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func apply() {
+        isApplying = true
+        defer { isApplying = false }
+        do {
+            let record = try ReconciliationPlanImporter.apply(preview, transactions: transactions, reconciliations: reconciliations, in: modelContext)
+            dismiss()
+            onApplied(record)
         } catch {
             errorMessage = error.localizedDescription
         }
