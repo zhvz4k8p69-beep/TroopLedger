@@ -294,7 +294,7 @@ struct TransactionListView: View {
 
     private var registerHeader: some View {
         HStack(spacing: 10) {
-            Text("DATE").frame(width: 76, alignment: .leading)
+            Text("DATE").frame(width: 92, alignment: .leading)
             Text("PAYEE / MEMO").frame(maxWidth: .infinity, alignment: .leading)
             Text("CATEGORY").frame(width: 120, alignment: .leading)
             Text("STATUS").frame(width: 82, alignment: .leading)
@@ -314,8 +314,9 @@ struct TransactionListView: View {
             selectedTransactionID = transaction.id
         } label: {
             HStack(spacing: 10) {
-                Text(transaction.date.formatted(.dateTime.month(.abbreviated).day()))
-                    .frame(width: 76, alignment: .leading)
+                Text(transaction.date.formatted(.dateTime.month(.abbreviated).day().year()))
+                    .monospacedDigit()
+                    .frame(width: 92, alignment: .leading)
 
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 5) {
